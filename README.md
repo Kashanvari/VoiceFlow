@@ -34,15 +34,31 @@ project and is not affiliated with Wispr.
 - **Microphone handling** for AirPods and Bluetooth headsets (see Troubleshooting), and it skips virtual
   "microphones" such as Microsoft Teams Audio that carry no voice.
 
-## Requirements
+## Download (easiest)
 
+For a Mac with **Apple Silicon** (M1 or newer) and **macOS 14 Sonoma** or newer. English speech only for now.
+
+1. Download **VoiceFlow-1.1.0-macOS-arm64.zip** from the
+   [latest release](https://github.com/Kashanvari/VoiceFlow/releases/latest) (12 MB).
+2. Double-click the zip, then drag **VoiceFlow** into your **Applications** folder.
+3. Open VoiceFlow. The first time, macOS says it can't check the app for malicious software and won't open it,
+   because VoiceFlow isn't notarized by Apple (that needs a paid Apple developer account). Click **Done**, then go to
+   **System Settings → Privacy & Security**, scroll down to *"VoiceFlow" was blocked*, click **Open Anyway**, and
+   confirm with your password. You only do this once per version.
+4. On first launch VoiceFlow downloads its two AI models (about 1.3 GB, once) into
+   `~/Library/Application Support/VoiceFlow`. The window shows the progress. After that it works offline.
+5. Follow **First launch** below (microphone, Accessibility, and the 🌐 key setting).
+
+When you install a newer version, macOS may forget the Microphone and Accessibility permissions: switch VoiceFlow
+off and on again in Privacy & Security if it stops hearing you or stops reacting to the key.
+
+## Build from source
+
+Requirements:
 - A Mac with **Apple Silicon** (M1 or newer) and **macOS 14 Sonoma** or newer
 - **Apple's Command Line Tools** (`xcode-select --install`); the full Xcode app is not needed
 - **Homebrew** (https://brew.sh), used to install llama.cpp
 - About **2 GB** of free space (1.3 GB of models plus the build)
-- English speech (the Parakeet v2 model is English-only)
-
-## Install
 
 ```bash
 git clone https://github.com/Kashanvari/VoiceFlow.git ~/Projects/VoiceFlow
@@ -52,8 +68,11 @@ cd ~/Projects/VoiceFlow
 open ~/Applications/VoiceFlow.app
 ```
 
-Keep the folder out of iCloud-synced places (Desktop, Documents). The app keeps its models, history and logs inside
-this folder, and iCloud can remove large files from the Mac to save space.
+Keep the folder out of iCloud-synced places (Desktop, Documents). An app built from source keeps its models, history
+and logs inside this folder, and iCloud can remove large files from the Mac to save space.
+
+`./build.sh --release` builds the ready-made download instead: it bundles the official llama.cpp build (pinned and
+checked by SHA-256), signs the app ad-hoc and writes `dist/VoiceFlow-<version>-macOS-arm64.zip`.
 
 ### Recommended: a free personal signing certificate
 
@@ -118,9 +137,11 @@ let go  ─► Parakeet TDT 0.6b v2 via FluidAudio (Neural Engine)            mo
         ─► paste: clipboard + ⌘V, then your previous clipboard is restored
 ```
 
-- VoiceFlow starts `llama-server` itself on `127.0.0.1:8790` (local only) and stops it when it quits. If llama.cpp
-  or the clean-up model is missing, VoiceFlow still works with the rules-only clean-up.
-- History is stored as text only (no audio) in `data/history.jsonl`. Logs with timings are in `logs/`.
+- VoiceFlow starts `llama-server` itself on `127.0.0.1:8790` (local only) and stops it when it quits. The downloaded
+  app carries its own copy of llama.cpp; a build from source uses Homebrew's. If llama.cpp or the clean-up model is
+  missing, VoiceFlow still works with the rules-only clean-up.
+- History is stored as text only (no audio) in `data/history.jsonl`, with logs in `logs/`: inside the project folder
+  for a build from source, or in `~/Library/Application Support/VoiceFlow` for the downloaded app.
 - Nothing is sent over the network, apart from the one-time model downloads from Hugging Face.
 
 ## Troubleshooting
@@ -133,7 +154,8 @@ let go  ─► Parakeet TDT 0.6b v2 via FluidAudio (Neural Engine)            mo
 | "No real microphone" | Mac minis and Mac Studios have no built-in mic. Connect AirPods, a headset or a USB microphone |
 | The first words get cut off with AirPods | Wait for the red dot. Keep "Keep the microphone ready" on (Settings) so the next dictation starts instantly |
 | Music sounds like a phone call after dictating | That's AirPods in call mode while the mic is kept ready (30 s). Switch off "Keep the microphone ready" in Settings |
-| "Clean-up: Not running (rules only)" | Run `./scripts/setup.sh`; see `logs/llama-server.log` |
+| "Clean-up: Not running (rules only)" | Downloaded app: quit and reopen it (it starts the model download again). From source: run `./scripts/setup.sh`. Details in `logs/llama-server.log` |
+| macOS won't open the downloaded app | System Settings → Privacy & Security → *"VoiceFlow" was blocked* → Open Anyway |
 
 ## Development
 

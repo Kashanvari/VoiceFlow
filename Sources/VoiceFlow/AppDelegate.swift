@@ -32,6 +32,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // MARK: - Start-up
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Test modes (no window, no permission prompts): see recordTest, pasteTest, selfTest.
+        if CommandLine.arguments.contains("--record-test") { recordTest(); return }
+        if CommandLine.arguments.contains("--paste-test") { pasteTest(); return }
+        if CommandLine.arguments.contains("--selftest") { selfTest(); return }
+
         NSApp.setActivationPolicy(.regular)
         NSApp.mainMenu = makeMainMenu()
 
@@ -74,14 +79,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         if AVCaptureDevice.authorizationStatus(for: .audio) == .notDetermined { state.requestMicrophone() }
 
-        if CommandLine.arguments.contains("--record-test") {
-            recordTest()
-            return
-        }
-        if CommandLine.arguments.contains("--paste-test") {
-            pasteTest()
-            return
-        }
         loadModels()
         window.show()
         History.log("VoiceFlow started (accessibility \(AXIsProcessTrusted() ? "on" : "off"), microphone "
@@ -188,6 +185,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         state.cleanerRunning = false
         Task {
             do {
+                try await ensureCleanupModel()
                 try await cleaner.start(logFile: History.logsFolder.appendingPathComponent("llama-server.log"))
                 state.cleanerRunning = true
                 History.log("clean-up model running")
@@ -195,6 +193,54 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 History.log("clean-up model failed: \(error.localizedDescription); using rules only")
             }
             cleanerStarting = false
+        }
+    }
+
+    /// First launch of the ready-made app: download the clean-up model (834 MB), with progress in the window.
+    private func ensureCleanupModel() async throws {
+        guard !FileManager.default.fileExists(atPath: Cleaner.modelFile.path) else { return }
+        History.log("downloading the clean-up model")
+        state.cleanupDownload = 0
+        defer { state.cleanupDownload = nil }
+        try await ModelDownloader.ensure(ModelDownloader.cleanup) { [weak self] fraction in
+            Task { @MainActor in self?.state.cleanupDownload = fraction }
+        }
+        History.log("clean-up model downloaded and verified")
+    }
+
+    /// `open VoiceFlow.app --args --selftest`: the first-launch path without microphone or permissions. Downloads
+    /// the models if needed, starts the clean-up server, speaks a test sentence with `say`, transcribes and cleans
+    /// it, logs the result and quits.
+    private func selfTest() {
+        NSApp.setActivationPolicy(.accessory)
+        Task {
+            History.log("self-test: VoiceFlow \(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"), folder \(Paths.project.path)")
+            do {
+                var t0 = Date()
+                try await transcriber.load(onDownload: { History.log("self-test: downloading the speech model") })
+                History.log("self-test: speech model ready in \(Int(Date().timeIntervalSince(t0))) s")
+                t0 = Date()
+                try await ModelDownloader.ensure(ModelDownloader.cleanup) { _ in }
+                try await cleaner.start(logFile: History.logsFolder.appendingPathComponent("llama-server.log"))
+                History.log("self-test: clean-up ready in \(Int(Date().timeIntervalSince(t0))) s using \(await cleaner.serverPath ?? "?")")
+
+                let file = FileManager.default.temporaryDirectory.appendingPathComponent("voiceflow-selftest.aiff")
+                let say = Process()
+                say.executableURL = URL(fileURLWithPath: "/usr/bin/say")
+                say.arguments = ["-o", file.path, "Um, let's meet on Thursday, no, Friday at noon."]
+                try say.run()
+                say.waitUntilExit()
+                let raw = try await transcriber.transcribe(try Audio.load(file))
+                let cleaned = await cleaner.clean(raw)
+                History.log("self-test: heard \"\(raw)\" → wrote \"\(Rules.finish(cleaned.text))\""
+                            + (cleaned.fallbackReason.map { " (rules only: \($0))" } ?? " (AI clean-up used)"))
+                try? FileManager.default.removeItem(at: file)
+            } catch {
+                History.log("self-test FAILED: \(error.localizedDescription)")
+            }
+            await cleaner.stop()
+            History.flush()
+            NSApp.terminate(nil)
         }
     }
 

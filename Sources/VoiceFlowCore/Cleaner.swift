@@ -13,7 +13,11 @@ public actor Cleaner {
     }
 
     public static let modelFile = Paths.models.appendingPathComponent("cleanup/speakoflow-mini-Q8_0.gguf")
-    static let serverCandidates = ["/opt/homebrew/bin/llama-server", "/usr/local/bin/llama-server"]
+    /// The copy inside the ready-made app first, then Homebrew's (for builds from source).
+    static var serverCandidates: [String] {
+        [Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/llama/llama-server").path,
+         "/opt/homebrew/bin/llama-server", "/usr/local/bin/llama-server"]
+    }
     /// Text is cleaned in pieces of about this many words, so a long dictation never overflows the model's
     /// 4,096-token window (input + output) and each request stays well under a second.
     static let chunkWords = 120
@@ -42,6 +46,8 @@ public actor Cleaner {
     /// Marks our llama-server so a stale one (left behind by a crash) can be found and stopped.
     private let alias: String
     private var server: Process?
+    /// Which llama-server program is running (the app's own copy, or Homebrew's).
+    public private(set) var serverPath: String?
     private let session: URLSession
     private var baseURL: URL { URL(string: "http://127.0.0.1:\(port)")! }
 
@@ -88,6 +94,7 @@ public actor Cleaner {
         }
         try p.run()
         server = p
+        serverPath = binary
         for _ in 0..<120 {  // up to 30 s
             if await healthy() {
                 _ = try? await ask("Warm up.")  // first answer loads the model onto the GPU

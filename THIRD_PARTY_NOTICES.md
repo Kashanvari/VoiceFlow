@@ -17,8 +17,10 @@ VoiceFlow's own code is MIT-licensed (see `LICENSE`). It builds on the following
   so, subject to the following conditions: The above copyright notice and this permission notice shall be
   included in all copies or substantial portions of the Software. THE SOFTWARE IS PROVIDED "AS IS", WITHOUT
   WARRANTY OF ANY KIND.
-- **llama.cpp** (MIT), ggml-org: https://github.com/ggml-org/llama.cpp
-  Not bundled: installed separately with Homebrew and run as a separate program.
+- **llama.cpp** (MIT), Copyright (c) 2023-2026 The ggml authors: https://github.com/ggml-org/llama.cpp
+  The downloadable app bundles the official build b11146 (`llama-server` and its libraries, unmodified) in
+  `VoiceFlow.app/Contents/Helpers/llama`, with its licence at `Contents/Resources/llama.cpp-LICENSE.txt`.
+  Builds from source use llama.cpp installed with Homebrew instead. Both run it as a separate program.
 
 ## Models (downloaded by `scripts/setup.sh`, not included in this repository)
 

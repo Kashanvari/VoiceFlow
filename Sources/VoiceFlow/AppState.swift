@@ -11,6 +11,8 @@ final class AppState: ObservableObject {
 
     @Published var status: Status = .loading
     @Published var cleanerRunning = false
+    /// 0…1 while the clean-up model downloads on first launch (nil otherwise).
+    @Published var cleanupDownload: Double?
     @Published var history: [History.Entry] = History.load()
     @Published var micAllowed = false
     @Published var accessibilityAllowed = false

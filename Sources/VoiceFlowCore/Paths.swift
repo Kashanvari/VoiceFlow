@@ -10,7 +10,8 @@ public enum Paths {
             return URL(fileURLWithPath: recorded, isDirectory: true)
         }
         // 2. Command-line tools run from .build/…: walk up to the folder that holds Package.swift.
-        if let executable = Bundle.main.executableURL?.resolvingSymlinksInPath() {
+        //    (Not for an app bundle: the ready-made app has no project folder.)
+        if Bundle.main.bundleURL.pathExtension != "app", let executable = Bundle.main.executableURL?.resolvingSymlinksInPath() {
             var folder = executable.deletingLastPathComponent()
             while folder.path != "/" {
                 if FileManager.default.fileExists(atPath: folder.appendingPathComponent("Package.swift").path) {
@@ -19,7 +20,7 @@ public enum Paths {
                 folder = folder.deletingLastPathComponent()
             }
         }
-        // 3. Fallback.
+        // 3. The ready-made app from the GitHub release: ~/Library/Application Support/VoiceFlow.
         return FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("VoiceFlow", isDirectory: true)
     }()

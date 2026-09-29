@@ -104,7 +104,7 @@ private struct StatusBadge: View {
         if state.missingPermissions, state.status == .ready { return (.orange, "Needs permission, see Settings") }
         switch state.status {
         case .loading: return (.yellow, "Loading speech model…")
-        case .downloading: return (.yellow, "Downloading speech model (450 MB)…")
+        case .downloading: return (.yellow, "Downloading the speech model…")
         case .ready: return (.green, "Ready · hold \(state.dictationKey.short) to talk")
         case .recording: return (.red, "Listening…")
         case .working: return (Brand.blue, "Writing…")
@@ -128,6 +128,7 @@ private struct HomeView: View {
                         .foregroundStyle(.secondary)
                 }
 
+                if state.status == .downloading || state.cleanupDownload != nil { DownloadBanner() }
                 if state.missingPermissions { PermissionBanner() }
                 if state.activeMicrophone?.isVirtual ?? true { NoMicrophoneBanner() }
 
@@ -298,6 +299,30 @@ private struct PermissionBanner: View {
         }
         .padding(14)
         .background(RoundedRectangle(cornerRadius: 12).fill(Color.orange.opacity(0.1)))
+    }
+}
+
+/// First launch of the ready-made app: the two AI models download once (about 1.3 GB).
+private struct DownloadBanner: View {
+    @EnvironmentObject var state: AppState
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "arrow.down.circle.fill").foregroundStyle(Brand.gradient).font(.system(size: 18))
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Getting VoiceFlow ready").font(.system(size: 13, weight: .semibold))
+                Text("Downloading the AI models once (about 1.3 GB). After this, everything runs offline on your Mac.")
+                    .font(.system(size: 12)).foregroundStyle(.secondary)
+                if let fraction = state.cleanupDownload {
+                    ProgressView(value: fraction) { Text("Clean-up model · \(Int(fraction * 100))%").font(.caption) }
+                }
+                if state.status == .downloading {
+                    ProgressView { Text("Speech model").font(.caption) }.progressViewStyle(.linear)
+                }
+            }
+        }
+        .padding(14)
+        .background(RoundedRectangle(cornerRadius: 12).fill(Color.primary.opacity(0.04)))
     }
 }
 

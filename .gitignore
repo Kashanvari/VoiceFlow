@@ -16,3 +16,7 @@ research/
 
 # Test run logs
 experiments/**/server-*.log
+
+# Release builds
+dist/
+vendor/
