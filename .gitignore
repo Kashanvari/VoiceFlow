@@ -1,0 +1,18 @@
+.build/
+.swiftpm/
+*.xcodeproj
+.DS_Store
+
+# AI models (about 1.3 GB): downloaded by scripts/setup.sh, never stored in git
+models/*
+!models/README.md
+
+# Personal: dictation history, dictionary, logs
+data/
+logs/
+
+# Local research notes (not part of the app)
+research/
+
+# Test run logs
+experiments/**/server-*.log
