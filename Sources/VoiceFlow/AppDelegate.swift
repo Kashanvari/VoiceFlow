@@ -12,7 +12,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let state = AppState()
     private lazy var window = MainWindow(state: state)
     private let transcriber = Transcriber()
-    private let cleaner = Cleaner()
+    private let cleaner = Cleaner(port: AppDelegate.cleanerPort)
+
+    /// Each kind of VoiceFlow gets its own clean-up port, so they never stop each other's server: a build from
+    /// source (8790), the downloaded app (8792) and the self-test (8793) can all run on the same Mac.
+    /// (Found 2026-09-29: the download's self-test on 8790 stopped the source build's server.)
+    private static var cleanerPort: Int {
+        if CommandLine.arguments.contains("--selftest") { return 8793 }
+        return Bundle.main.bundleIdentifier == "com.kash.voiceflow" ? 8790 : 8792
+    }
     private let recorder = Recorder()
     private let fnKeys = FnKeyMonitor()
     private let indicator = Indicator()

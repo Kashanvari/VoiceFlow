@@ -137,7 +137,8 @@ let go  ─► Parakeet TDT 0.6b v2 via FluidAudio (Neural Engine)            mo
         ─► paste: clipboard + ⌘V, then your previous clipboard is restored
 ```
 
-- VoiceFlow starts `llama-server` itself on `127.0.0.1:8790` (local only) and stops it when it quits. The downloaded
+- VoiceFlow starts `llama-server` itself on `127.0.0.1` (local only; port 8790 for a build from source, 8792 for the
+  downloaded app) and stops it when it quits. The downloaded
   app carries its own copy of llama.cpp; a build from source uses Homebrew's. If llama.cpp or the clean-up model is
   missing, VoiceFlow still works with the rules-only clean-up.
 - History is stored as text only (no audio) in `data/history.jsonl`, with logs in `logs/`: inside the project folder
