@@ -23,6 +23,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
     private let recorder = Recorder()
     private let fnKeys = FnKeyMonitor()
+    private let editWatcher = EditWatcher()
     private let indicator = Indicator()
     private var statusItem: NSStatusItem!
 
@@ -44,11 +45,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if CommandLine.arguments.contains("--record-test") { recordTest(); return }
         if CommandLine.arguments.contains("--paste-test") { pasteTest(); return }
         if CommandLine.arguments.contains("--selftest") { selfTest(); return }
+        if CommandLine.arguments.contains("--ax-probe") { axProbe(); return }
+        if CommandLine.arguments.contains("--learn-test") { learnTest(); return }
 
         NSApp.setActivationPolicy(.regular)
         NSApp.mainMenu = makeMainMenu()
 
-        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        // As wide as the logo (32 pt), so the icons beside it don't shift when VoiceFlow shows ⏳ or … instead.
+        statusItem = NSStatusBar.system.statusItem(withLength: (Self.logo?.size.width ?? 22) + 6)
         let menu = NSMenu()
         menu.delegate = self
         statusItem.menu = menu
@@ -67,6 +71,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         fnKeys.onCancel = { [weak self] byUser in self?.cancelRecording(byUser: byUser) }
         fnKeys.isRecording = { [weak self] in self?.recorder.isRecording ?? false }
         fnKeys.key = state.dictationKey
+        editWatcher.onFinished = { [weak self] pasted, now, app in
+            guard let self, self.state.learnFromEdits else { return }
+            let learned = self.state.learn(pasted: pasted, now: now, app: app)
+            if !learned.isEmpty, self.phase == .ready {
+                self.indicator.show(.message("Learned: \(learned.joined(separator: ", "))"), hideAfter: 1.8)
+            }
+        }
+        state.onLearnFromEditsChanged = { [weak self] on in if !on { self?.editWatcher.cancel() } }
         indicator.keyName = state.dictationKey.short
         state.onDictationKeyChanged = { [weak self] key in
             self?.fnKeys.key = key
@@ -144,6 +156,97 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                         + "clipboard \(after == before ? "restored" : "NOT restored (\(after ?? "nil"))")")
             History.flush()
             NSApp.terminate(nil)
+        }
+    }
+
+    /// `open -n VoiceFlow.app --args --ax-probe`: logs, for every open app, whether VoiceFlow can read the text box
+    /// that has the focus there (kind of box and number of characters only, never the text). Then quits.
+    private func axProbe() {
+        NSApp.setActivationPolicy(.accessory)
+        for app in NSWorkspace.shared.runningApplications
+        where app.activationPolicy == .regular && app.processIdentifier != getpid() {
+            let name = app.localizedName ?? "?"
+            // The first ask switches Electron apps' sharing on; give them a moment to build it.
+            var box = TextBox.focused(in: app.processIdentifier)
+            if box == nil { Thread.sleep(forTimeInterval: 0.6); box = TextBox.focused(in: app.processIdentifier) }
+            if let box, let text = box.text() {
+                History.log("ax probe: \(name): readable \(box.role), \(text.count) characters")
+            } else {
+                let appElement = AXUIElementCreateApplication(app.processIdentifier)
+                let focused = TextBox.value(appElement, kAXFocusedUIElementAttribute).map { $0 as! AXUIElement }
+                let window = TextBox.value(appElement, kAXFocusedWindowAttribute) != nil
+                let detail = focused.map { f in
+                    let role = TextBox(element: f).role
+                    let value = TextBox.value(f, kAXValueAttribute)
+                    let kind = value.map { v in v is String ? "text of \((v as! String).count) characters" : "a non-text value" } ?? "no value"
+                    return "focus on \(role) with \(kind)"
+                } ?? "no focused element (window \(window ? "yes" : "no"))"
+                History.log("ax probe: \(name): not readable: \(detail)")
+                if focused == nil, window, app.bundleIdentifier == CommandLine.arguments.last {
+                    probeDeeper(appElement, name)
+                }
+            }
+        }
+        History.flush()
+        NSApp.terminate(nil)
+    }
+
+    /// Probe detail for one app: the error codes, then a walk through its front window for text areas.
+    private func probeDeeper(_ appElement: AXUIElement, _ name: String) {
+        let manual = AXUIElementSetAttributeValue(appElement, "AXManualAccessibility" as CFString, kCFBooleanTrue)
+        let enhanced = AXUIElementSetAttributeValue(appElement, "AXEnhancedUserInterface" as CFString, kCFBooleanTrue)
+        Thread.sleep(forTimeInterval: 1.5)
+        var focusedValue: AnyObject?
+        let focusError = AXUIElementCopyAttributeValue(appElement, kAXFocusedUIElementAttribute as CFString, &focusedValue)
+        History.log("ax probe: \(name): manual \(manual.rawValue), enhanced \(enhanced.rawValue), focus error \(focusError.rawValue)")
+        guard let window = TextBox.value(appElement, kAXFocusedWindowAttribute).map({ $0 as! AXUIElement }) else { return }
+        var queue = [window], seen = 0, found: [String] = []
+        while !queue.isEmpty, seen < 4000 {
+            let element = queue.removeFirst()
+            seen += 1
+            let role = TextBox(element: element).role
+            let isFocused = TextBox.value(element, kAXFocusedAttribute) as? Bool == true
+            if role.hasPrefix("AXTextArea") || role.hasPrefix("AXTextField") || isFocused {
+                let length = (TextBox.value(element, kAXValueAttribute) as? String)?.count
+                found.append("\(role)\(isFocused ? " (focused)" : ""): \(length.map { "\($0) chars" } ?? "no text")")
+            }
+            if let children = TextBox.value(element, kAXChildrenAttribute) as? [AXUIElement] { queue += children }
+        }
+        History.log("ax probe: \(name): walked \(seen) elements; text boxes: \(found.isEmpty ? "none" : found.joined(separator: "; "))")
+        AXUIElementSetAttributeValue(appElement, "AXEnhancedUserInterface" as CFString, kCFBooleanFalse)
+    }
+
+    /// `open -n VoiceFlow.app --args --learn-test`: the learning loop in the front TextEdit document, without
+    /// touching the Dictionary. Pastes a sentence, corrects two words through Accessibility the way you would
+    /// (select, type), deletes the sentence like a sent message, and logs what VoiceFlow would learn. Then quits.
+    private func learnTest() {
+        NSApp.setActivationPolicy(.accessory)
+        Task {
+            defer { History.flush(); NSApp.terminate(nil) }
+            guard let textEdit = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.TextEdit").first
+            else { History.log("learn test: open a TextEdit document first"); return }
+            textEdit.activate()
+            try? await Task.sleep(nanoseconds: 800_000_000)
+            let sentence = "VoiceFlow learning test: please ask mark about the wisper flow update today."
+            var result: (pasted: String, now: String)?
+            editWatcher.onFinished = { pasted, now, _ in result = (pasted, now) }
+            guard Paster.paste(sentence) else { History.log("learn test: paste failed (Accessibility?)"); return }
+            editWatcher.watch(pasted: sentence, app: "TextEdit", pid: textEdit.processIdentifier)
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            guard let box = TextBox.focused(in: textEdit.processIdentifier) else {
+                History.log("learn test: FAILED, can't read TextEdit's text"); return
+            }
+            for (wrong, right) in [("mark", "Marc"), ("wisper flow", "Wispr Flow"), ("today.", "tod")] {
+                box.testReplace(wrong, with: right)  // "tod": half a word, left for less than ¾ s
+                try? await Task.sleep(nanoseconds: wrong == "today." ? 300_000_000 : 1_200_000_000)
+            }
+            // Delete the sentence, like sending a chat message: the watch should end by itself.
+            box.testReplace("VoiceFlow learning test: please ask Marc about the Wispr Flow update tod", with: "")
+            for _ in 0..<40 where result == nil { try? await Task.sleep(nanoseconds: 100_000_000) }
+            guard let result else { History.log("learn test: FAILED, the watch reported nothing"); return }
+            let edits = EditLearner.edits(pasted: result.pasted, now: result.now, isEnglishWord: AppState.isEnglishWord)
+            History.log("learn test: " + edits.map { "\"\($0.from)\" → \"\($0.to)\" (\($0.notLearned ?? "learned"))" }
+                .joined(separator: ", "))
         }
     }
 
@@ -286,6 +389,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let pressed = Date()
         recordingPressed = pressed
         recordingApp = NSWorkspace.shared.frontmostApplication?.localizedName ?? "?"
+        let front = NSWorkspace.shared.frontmostApplication?.processIdentifier
+        editWatcher.prepare(pid: state.learnFromEdits && front != getpid() ? front : nil)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { [weak self] in
             guard let self, self.phase == .recording, self.recordingPressed == pressed else { return }
             self.indicator.show(.listening(handsFree: false))
@@ -367,6 +472,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 return
             }
             let corrected = Replacements.apply(raw, dictionary)
+            state.countAutoFixes(in: raw)
             let cleaned = await cleaner.clean(corrected, useModel: useModel)
             let text = Rules.finish(cleaned.text)
             if useModel, cleaned.fallbackReason?.contains("model error") == true, await !cleaner.isHealthy() {
@@ -382,6 +488,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
 
             let pasted = Paster.paste(text)
+            if pasted, state.learnFromEdits, let front = NSWorkspace.shared.frontmostApplication,
+               front.processIdentifier != getpid() {
+                editWatcher.watch(pasted: text, app: front.localizedName ?? app, pid: front.processIdentifier)
+            }
             lastText = text
             lastRaw = raw
             phase = .ready
@@ -409,13 +519,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let symbol: String
         switch phase {
         case .loading: symbol = loadError == nil ? "hourglass" : "exclamationmark.triangle"
-        case .recording: symbol = "mic.fill"
+        case .recording: statusItem?.button?.image = Self.logoRecording ?? Self.symbol("mic.fill"); return
         case .working: symbol = "ellipsis"
-        case .ready: symbol = state.missingPermissions ? "exclamationmark.triangle" : "waveform"
+        case .ready:
+            if !state.missingPermissions, let logo = Self.logo { statusItem?.button?.image = logo; return }
+            symbol = state.missingPermissions ? "exclamationmark.triangle" : "waveform"
         }
-        let image = NSImage(systemSymbolName: symbol, accessibilityDescription: "VoiceFlow")
+        statusItem?.button?.image = Self.symbol(symbol)
+    }
+
+    private static func symbol(_ name: String) -> NSImage? {
+        let image = NSImage(systemSymbolName: name, accessibilityDescription: "VoiceFlow")
         image?.isTemplate = true
-        statusItem?.button?.image = image
+        return image
+    }
+
+    /// The logo for the menu bar (Resources/MenuBarIcon.png, drawn by scripts/make_icon.swift). A template image,
+    /// so macOS colours it to match the menu bar.
+    private static let logo: NSImage? = {
+        let image = Bundle.main.image(forResource: "MenuBarIcon")
+        image?.isTemplate = true
+        image?.accessibilityDescription = "VoiceFlow"
+        return image
+    }()
+
+    /// The logo in red while VoiceFlow is listening.
+    private static let logoRecording: NSImage? = logo.map { logo in
+        let image = NSImage(size: logo.size, flipped: false) { rect in
+            logo.draw(in: rect)
+            NSColor.systemRed.set()
+            rect.fill(using: .sourceAtop)
+            return true
+        }
+        image.accessibilityDescription = "VoiceFlow is listening"
+        return image
     }
 
     // MARK: - Menus
@@ -489,4 +626,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func copyLast() { if let lastText { Paster.copy(lastText) } }
     @objc private func copyLastRaw() { if let lastRaw { Paster.copy(lastRaw) } }
     @objc private func quit() { NSApp.terminate(nil) }
+}
+
+private extension TextBox {
+    /// For --learn-test only: selects `old` in the box and types `new` over it, through Accessibility.
+    func testReplace(_ old: String, with new: String) {
+        guard let text = text() else { return }
+        let found = (text as NSString).range(of: old)
+        guard found.location != NSNotFound else { return }
+        var range = CFRange(location: found.location, length: found.length)
+        guard let value = AXValueCreate(.cfRange, &range) else { return }
+        AXUIElementSetAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, value)
+        AXUIElementSetAttributeValue(element, kAXSelectedTextAttribute as CFString, new as CFString)
+    }
 }

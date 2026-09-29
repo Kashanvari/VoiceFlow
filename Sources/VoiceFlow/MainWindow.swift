@@ -41,12 +41,13 @@ private enum Brand {
 }
 
 private enum Page: String, CaseIterable, Identifiable {
-    case home = "Home", dictionary = "Dictionary", settings = "Settings"
+    case home = "Home", dictionary = "Dictionary", corrections = "Corrections", settings = "Settings"
     var id: String { rawValue }
     var icon: String {
         switch self {
         case .home: return "house"
         case .dictionary: return "character.book.closed"
+        case .corrections: return "wand.and.stars"
         case .settings: return "gearshape"
         }
     }
@@ -64,8 +65,7 @@ private struct RootView: View {
             .navigationSplitViewColumnWidth(min: 170, ideal: 190, max: 240)
             .safeAreaInset(edge: .top) {
                 HStack(spacing: 8) {
-                    RoundedRectangle(cornerRadius: 7).fill(Brand.gradient).frame(width: 26, height: 26)
-                        .overlay(Image(systemName: "waveform").font(.system(size: 13, weight: .bold)).foregroundStyle(.white))
+                    Image(nsImage: NSApp.applicationIconImage).resizable().frame(width: 30, height: 30)
                     Text("VoiceFlow").font(.system(size: 15, weight: .semibold))
                     Spacer()
                 }
@@ -78,6 +78,7 @@ private struct RootView: View {
             switch page {
             case .home: HomeView()
             case .dictionary: DictionaryView()
+            case .corrections: CorrectionsView()
             case .settings: SettingsView()
             }
         }
@@ -130,6 +131,7 @@ private struct HomeView: View {
 
                 if state.status == .downloading || state.cleanupDownload != nil { DownloadBanner() }
                 if state.missingPermissions { PermissionBanner() }
+                if state.dictationKey == .fn && !state.globeKeyDoesNothing { GlobeKeyBanner() }
                 if state.activeMicrophone?.isVirtual ?? true { NoMicrophoneBanner() }
 
                 HStack(spacing: 12) {
@@ -302,6 +304,26 @@ private struct PermissionBanner: View {
     }
 }
 
+/// macOS still opens the emoji picker when fn is tapped (System Settings → Keyboard → "Press 🌐 key to").
+private struct GlobeKeyBanner: View {
+    @EnvironmentObject var state: AppState
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "globe").foregroundStyle(.orange)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Tapping fn also opens the emoji picker").font(.system(size: 13, weight: .semibold))
+                Text("In Keyboard settings, set “Press 🌐 key to” to Do Nothing. macOS handles that key before VoiceFlow sees it, so only this setting stops it.")
+                    .font(.system(size: 12)).foregroundStyle(.secondary)
+            }
+            Spacer()
+            Button("Open Keyboard Settings") { state.openKeyboardSettings() }
+        }
+        .padding(14)
+        .background(RoundedRectangle(cornerRadius: 12).fill(Color.orange.opacity(0.1)))
+    }
+}
+
 /// First launch of the ready-made app: the two AI models download once (about 1.3 GB).
 private struct DownloadBanner: View {
     @EnvironmentObject var state: AppState
@@ -393,7 +415,13 @@ private struct DictionaryView: View {
                             HStack {
                                 TextField("", text: $r.from).textFieldStyle(.plain).frame(maxWidth: .infinity)
                                 TextField("", text: $r.to).textFieldStyle(.plain).frame(maxWidth: .infinity)
-                                Button { state.replacements.removeAll { $0.id == r.id } } label: {
+                                if state.isLearned(r) {
+                                    Text("Learned").font(.system(size: 10, weight: .semibold)).foregroundStyle(.secondary)
+                                        .padding(.horizontal, 6).padding(.vertical, 2)
+                                        .background(Capsule().fill(Color.primary.opacity(0.07)))
+                                        .help("Learned from one of your corrections")
+                                }
+                                Button { state.removeReplacement(r) } label: {
                                     Image(systemName: "trash").foregroundStyle(.secondary)
                                 }
                                 .buttonStyle(.borderless).help("Remove").frame(width: 24)
@@ -426,6 +454,114 @@ private struct DictionaryView: View {
     }
 }
 
+// MARK: - Corrections
+
+private struct CorrectionsView: View {
+    @EnvironmentObject var state: AppState
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Corrections").font(.system(size: 26, weight: .bold))
+                    Text("When VoiceFlow gets a word wrong, fix it right where it was typed. VoiceFlow notices, and writes it correctly from then on.")
+                        .foregroundStyle(.secondary)
+                }
+
+                if !state.learnFromEdits {
+                    HStack(spacing: 12) {
+                        Image(systemName: "pause.circle.fill").foregroundStyle(.orange)
+                        Text("Learning from corrections is off.").font(.system(size: 13, weight: .semibold))
+                        Spacer()
+                        Button("Turn On") { state.learnFromEdits = true }
+                    }
+                    .padding(14)
+                    .background(RoundedRectangle(cornerRadius: 12).fill(Color.orange.opacity(0.1)))
+                }
+
+                HStack(spacing: 12) {
+                    StatCard(value: "\(state.corrections.filter { $0.status == .learned }.count)", label: "Words learned",
+                             icon: "graduationcap")
+                    StatCard(value: "\(state.corrections.reduce(0) { $0 + $1.autoFixes })", label: "Times fixed for you",
+                             icon: "checkmark.seal")
+                    StatCard(value: "\(state.corrections.reduce(0) { $0 + $1.times })", label: "Corrections you made",
+                             icon: "pencil")
+                }
+
+                if state.corrections.isEmpty {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Image(systemName: "wand.and.stars").font(.system(size: 20)).foregroundStyle(Brand.gradient)
+                        Text("No corrections yet").font(.system(size: 14, weight: .semibold))
+                        Text("After a dictation, fix a wrong word where VoiceFlow typed it, for example “mark” → “Marc”. VoiceFlow notices the change and learns it. This works in apps that share their text box with VoiceFlow, such as Claude and TextEdit; most web browsers don't yet.")
+                            .font(.system(size: 12)).foregroundStyle(.secondary)
+                    }
+                    .padding(16).frame(maxWidth: .infinity, alignment: .leading)
+                    .background(RoundedRectangle(cornerRadius: 12).fill(Color.primary.opacity(0.035)))
+                } else {
+                    VStack(spacing: 0) {
+                        ForEach(state.corrections) { c in
+                            CorrectionRow(correction: c)
+                            if c.id != state.corrections.last?.id { Divider().padding(.leading, 14) }
+                        }
+                    }
+                    .background(RoundedRectangle(cornerRadius: 10).fill(Color.primary.opacity(0.035)))
+                }
+
+                Text("Learned words go into your Dictionary, where you can change them too. Everyday words (“to” → “two”, “meeting” → “meetings”) are listed but not learned, because a Dictionary entry changes that word in every dictation; use Learn if one is always wrong. VoiceFlow reads the text box only for a few minutes after each dictation, on this Mac, and keeps only the corrected words.")
+                    .font(.system(size: 12)).foregroundStyle(.secondary)
+            }
+            .padding(28)
+            .frame(maxWidth: 860, alignment: .leading)
+        }
+    }
+}
+
+private struct CorrectionRow: View {
+    @EnvironmentObject var state: AppState
+    let correction: Correction
+
+    var body: some View {
+        HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 8) {
+                    Text(correction.from).strikethrough().foregroundStyle(.secondary)
+                    Image(systemName: "arrow.right").font(.system(size: 11)).foregroundStyle(.secondary)
+                    Text(correction.to).fontWeight(.semibold)
+                }
+                .font(.system(size: 14))
+                Text(details).font(.system(size: 12)).foregroundStyle(.secondary)
+            }
+            Spacer()
+            Text(chip.0).font(.system(size: 11, weight: .semibold)).foregroundStyle(chip.1)
+                .padding(.horizontal, 8).padding(.vertical, 3)
+                .background(Capsule().fill(chip.1.opacity(0.12)))
+            if correction.status == .learned {
+                Button("Forget") { state.forget(correction) }.help("Stop replacing this word")
+            } else {
+                Button("Learn") { state.learnAnyway(correction) }.help("Add it to the Dictionary")
+            }
+            Button { state.remove(correction) } label: { Image(systemName: "trash").foregroundStyle(.secondary) }
+                .buttonStyle(.borderless).help("Remove from this list (and the Dictionary)")
+        }
+        .padding(.horizontal, 14).padding(.vertical, 10)
+    }
+
+    private var chip: (String, Color) {
+        switch correction.status {
+        case .learned: return ("Learned", .green)
+        case .notLearned: return ("Not learned", .secondary)
+        case .forgotten: return ("Forgotten", .orange)
+        }
+    }
+
+    private var details: String {
+        var parts = ["Corrected \(correction.times)×", correction.app, correction.lastSeen.formatted(.dateTime.month().day())]
+        if correction.status == .learned, correction.autoFixes > 0 { parts.append("fixed for you \(correction.autoFixes)×") }
+        if correction.status != .learned, let note = correction.note { parts.append(note) }
+        return parts.joined(separator: " · ")
+    }
+}
+
 // MARK: - Settings
 
 private struct SettingsView: View {
@@ -441,13 +577,21 @@ private struct SettingsView: View {
                     Text("Dictation key")
                     Text("Hold to talk · double-tap for hands-free · Esc to cancel")
                 }
-                if state.dictationKey == .fn {
-                    Text("Set System Settings → Keyboard → “Press 🌐 key to” → Do Nothing, or fn also opens the emoji picker.")
-                        .font(.caption).foregroundStyle(.secondary)
+                if state.dictationKey == .fn && !state.globeKeyDoesNothing {
+                    HStack {
+                        Text("Tapping fn also opens the emoji picker until “Press 🌐 key to” is set to Do Nothing.")
+                            .font(.caption).foregroundStyle(.orange)
+                        Spacer()
+                        Button("Open Keyboard Settings") { state.openKeyboardSettings() }.controlSize(.small)
+                    }
                 }
                 Toggle(isOn: $state.aiCleanup) {
                     Text("AI clean-up")
                     Text("Removes filler words, fixes “Thursday, no, Friday”, and handles “new paragraph”, emails and lists.")
+                }
+                Toggle(isOn: $state.learnFromEdits) {
+                    Text("Learn from my corrections")
+                    Text("After a dictation, VoiceFlow watches that text box for a few minutes. Fix a wrong word there and it writes it right from then on. Only the corrected words are kept.")
                 }
                 Toggle("Sounds when recording starts and stops", isOn: $state.sounds)
             }

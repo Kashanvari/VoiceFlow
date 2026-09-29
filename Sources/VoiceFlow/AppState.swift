@@ -41,6 +41,20 @@ final class AppState: ObservableObject {
     @Published var replacements: [Replacement] = AppState.loadReplacements() {
         didSet { saveReplacements() }
     }
+    /// Words you corrected after dictating (Corrections.swift).
+    @Published var corrections: [Correction] = AppState.loadCorrections() {
+        didSet { saveCorrections() }
+    }
+    /// Watch the text box after each dictation and learn the words you fix (EditWatcher).
+    @Published var learnFromEdits: Bool = UserDefaults.standard.object(forKey: "learnFromEdits") as? Bool ?? true {
+        didSet { UserDefaults.standard.set(learnFromEdits, forKey: "learnFromEdits"); onLearnFromEditsChanged(learnFromEdits) }
+    }
+    var onLearnFromEditsChanged: (Bool) -> Void = { _ in }
+
+    /// macOS's "Press 🌐 key to" setting is Do Nothing. Otherwise tapping fn also opens the emoji picker (or
+    /// switches the keyboard): macOS acts on it before any app sees the key, so VoiceFlow can only point it out.
+    /// (Found 2026-09-29: an event tap that took fn's own events at the HID level did not stop the emoji picker.)
+    @Published var globeKeyDoesNothing = AppState.readGlobeKeySetting()
 
     /// Called after a permission changes, so AppDelegate can start listening for fn.
     var onAccessibilityGranted: () -> Void = {}
@@ -62,6 +76,16 @@ final class AppState: ObservableObject {
         let mics = Microphones.all()
         if mics != microphones { microphones = mics }
         openAtLogin = SMAppService.mainApp.status == .enabled
+        let globe = Self.readGlobeKeySetting()
+        if globe != globeKeyDoesNothing { globeKeyDoesNothing = globe }
+    }
+
+    /// AppleFnUsageType in com.apple.HIToolbox: 0 is Do Nothing; missing means macOS's default, which showed
+    /// Show Emoji & Symbols on the author's Mac.
+    private static func readGlobeKeySetting() -> Bool {
+        let domain = "com.apple.HIToolbox" as CFString
+        CFPreferencesAppSynchronize(domain)
+        return CFPreferencesCopyAppValue("AppleFnUsageType" as CFString, domain) as? Int == 0
     }
 
     var missingPermissions: Bool { !micAllowed || !accessibilityAllowed }
@@ -118,6 +142,10 @@ final class AppState: ObservableObject {
 
     func openAccessibilitySettings() {
         NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!)
+    }
+
+    func openKeyboardSettings() {
+        NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.Keyboard-Settings.extension")!)
     }
 
     func openProjectFolder() {
