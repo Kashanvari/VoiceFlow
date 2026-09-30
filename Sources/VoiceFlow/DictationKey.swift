@@ -26,6 +26,21 @@ enum DictationKey: String, CaseIterable, Identifiable {
         }
     }
 
+    /// Whether this key is down, going by a flagsChanged event. The right-hand keys are told apart from their
+    /// left-hand twins by the keyboard's own bits, so letting go of right ⌥ while left ⌥ is held counts as up.
+    func isDown(in event: NSEvent) -> Bool {
+        // The per-key bits (left and right ⌃ ⇧ ⌘ ⌥); all zero on keyboards and remapping tools that send none.
+        let sides = event.modifierFlags.rawValue & 0x207F
+        let mine: UInt
+        switch self {
+        case .fn: return event.modifierFlags.contains(flag)
+        case .rightOption: mine = 0x40
+        case .rightCommand: mine = 0x10
+        case .rightControl: mine = 0x2000
+        }
+        return sides == 0 ? event.modifierFlags.contains(flag) : sides & mine != 0
+    }
+
     /// Short name for sentences: "hold fn", "hold right ⌥".
     var short: String {
         switch self {

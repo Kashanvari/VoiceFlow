@@ -34,16 +34,33 @@ final class AppState: ObservableObject {
     }
     var onDictationKeyChanged: (DictationKey) -> Void = { _ in }
 
+    @Published var language: Language = Language(rawValue: UserDefaults.standard.string(forKey: "language") ?? "") ?? .english {
+        didSet {
+            guard language != oldValue else { return }
+            UserDefaults.standard.set(language.rawValue, forKey: "language")
+            onLanguageChanged(language)
+        }
+    }
+    var onLanguageChanged: (Language) -> Void = { _ in }
+    @Published var farsiModel: FarsiModelStatus = .notLoaded
+
     /// Keep the microphone open for 30 s after a dictation so the next one starts instantly.
     @Published var keepMicReady: Bool = UserDefaults.standard.object(forKey: "keepMicReady") as? Bool ?? true {
         didSet { UserDefaults.standard.set(keepMicReady, forKey: "keepMicReady") }
     }
     @Published var replacements: [Replacement] = AppState.loadReplacements() {
-        didSet { saveReplacements() }
+        didSet {
+            guard replacements != oldValue else { return }
+            saveReplacements()
+            // A learned entry you typed over on the Dictionary page is yours now.
+            var list = corrections
+            Learning.reconcile(corrections: &list, replacements: replacements)
+            if list != corrections { corrections = list }
+        }
     }
     /// Words you corrected after dictating (Corrections.swift).
     @Published var corrections: [Correction] = AppState.loadCorrections() {
-        didSet { saveCorrections() }
+        didSet { if corrections != oldValue { saveCorrections() } }
     }
     /// Watch the text box after each dictation and learn the words you fix (EditWatcher).
     @Published var learnFromEdits: Bool = UserDefaults.standard.object(forKey: "learnFromEdits") as? Bool ?? true {
@@ -68,14 +85,18 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// Runs every 2 s. Only a value that changed is stored: storing the same value again would still redraw
+    /// the whole window (the Home page with its full history) each time.
     func refreshPermissions() {
-        micAllowed = AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
+        let mic = AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
+        if mic != micAllowed { micAllowed = mic }
         let ax = AXIsProcessTrusted()
         if ax && !accessibilityAllowed { onAccessibilityGranted() }
-        accessibilityAllowed = ax
+        if ax != accessibilityAllowed { accessibilityAllowed = ax }
         let mics = Microphones.all()
         if mics != microphones { microphones = mics }
-        openAtLogin = SMAppService.mainApp.status == .enabled
+        let login = SMAppService.mainApp.status == .enabled
+        if login != openAtLogin { openAtLogin = login }
         let globe = Self.readGlobeKeySetting()
         if globe != globeKeyDoesNothing { globeKeyDoesNothing = globe }
     }
@@ -159,12 +180,9 @@ final class AppState: ObservableObject {
     /// Reads each entry on its own and accepts hand-written ones without an "id". If the file can't be read at
     /// all, it is moved aside (dictionary.unreadable-<date>.json) instead of being overwritten by the next edit.
     private static func loadReplacements() -> [Replacement] {
-        guard let data = try? Data(contentsOf: dictionaryFile) else { return [] }
+        guard let data = saved(dictionaryFile) else { return [] }
         guard let items = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
-            let stamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
-            let aside = History.folder.appendingPathComponent("dictionary.unreadable-\(stamp).json")
-            try? FileManager.default.moveItem(at: dictionaryFile, to: aside)
-            History.log("dictionary.json could not be read; kept it as \(aside.lastPathComponent)")
+            setAside(dictionaryFile, because: "isn't a list of entries")
             return []
         }
         return items.compactMap { item in
@@ -172,6 +190,27 @@ final class AppState: ObservableObject {
             let id = (item["id"] as? String).flatMap(UUID.init(uuidString:)) ?? UUID()
             return Replacement(id: id, from: from, to: to)
         }
+    }
+
+    /// What a saved file holds; nil when there is no file yet. A file that is there but can't be opened is moved
+    /// aside like an unreadable one, so the next save doesn't replace your list with an empty one.
+    static func saved(_ file: URL) -> Data? {
+        do {
+            return try Data(contentsOf: file)
+        } catch let error as CocoaError where error.code == .fileReadNoSuchFile {
+            return nil
+        } catch {
+            setAside(file, because: error.localizedDescription)
+            return nil
+        }
+    }
+
+    /// Renames dictionary.json to dictionary.unreadable-<date>.json (the same for corrections.json).
+    static func setAside(_ file: URL, because reason: String) {
+        let stamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
+        let name = "\(file.deletingPathExtension().lastPathComponent).unreadable-\(stamp).json"
+        try? FileManager.default.moveItem(at: file, to: file.deletingLastPathComponent().appendingPathComponent(name))
+        History.log("\(file.lastPathComponent) could not be read (\(reason)); kept it as \(name)")
     }
 
     private func saveReplacements() {

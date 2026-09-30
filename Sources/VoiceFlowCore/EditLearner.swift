@@ -9,8 +9,10 @@ import Foundation
 ///
 /// A kept edit is learned (added to the Dictionary) when it involves a word that isn't ordinary English (a name or
 /// a mis-spelling), a name written as an ordinary word ("cloud" → "Claude"), or joined-up or capitalised spelling
-/// ("github" → "GitHub"). Edits between two everyday words ("meeting" → "meetings", "to" → "two") are reported
-/// but not learned: a Dictionary entry changes that word in every dictation.
+/// ("github" → "GitHub"). Reported but not learned, because a Dictionary entry changes that word in every
+/// dictation: edits between two everyday words ("meeting" → "meetings", "to" → "two", "every day" → "everyday"),
+/// capitals for emphasis ("not" → "NOT"), a changed ending ("webhook" → "webhooks"), and a word cut short
+/// ("Andersson" → "Anders"). "Learn" on the Corrections page adds any of them anyway.
 /// Tested by `VoiceFlowCheck --rules`.
 public enum EditLearner {
     public struct Edit: Equatable, Sendable {
@@ -72,8 +74,10 @@ public enum EditLearner {
             while let step = block.last, isSentenceCapital(step, a, b, isEnglishWord) { block.removeLast() }
             defer { block = [] }
             let old = block.compactMap(\.a).map { a[$0] }, new = block.compactMap(\.b).map { b[$0] }
+            let startsSentence = new.first.map { word in b.firstIndex { $0.pieceUTF16 == word.pieceUTF16 } }
+                .flatMap { $0 }.map { $0 > 0 && b[$0 - 1].endsSentence } ?? false
             guard (1...3).contains(old.count), (1...3).contains(new.count),
-                  let edit = classify(old, new, isEnglishWord) else { return }
+                  let edit = classify(old, new, startsSentence: startsSentence, isEnglishWord) else { return }
             if !result.contains(edit) { result.append(edit) }
         }
 
@@ -158,16 +162,28 @@ public enum EditLearner {
 
     // MARK: - Deciding what an edit is
 
-    private static func classify(_ old: [Token], _ new: [Token], _ isEnglishWord: (String) -> Bool) -> Edit? {
+    private static func classify(_ old: [Token], _ new: [Token], startsSentence: Bool,
+                                 _ isEnglishWord: (String) -> Bool) -> Edit? {
         let from = old.map(\.text).joined(separator: " "), to = new.map(\.text).joined(separator: " ")
         let oldKey = old.map(\.key).joined(), newKey = new.map(\.key).joined()
         let unknownOld = old.contains { !isEnglishWord($0.text) }
         let unknownNew = new.contains { !isEnglishWord($0.text) }
+        // Pieces of text run together ("GitHub.We are", "done..next", "notes.md5.use"): a missing space or
+        // something else the text box showed next to the words, not a spelling. "Node.js" and "example.com" pass.
+        if (old + new).contains(where: { isRunTogether($0.text) }) { return nil }
+        let innerCapital = new.contains { $0.text.dropFirst().contains(where: \.isUppercase) }
 
         if oldKey == newKey {
             // Only spaces, capitals or punctuation changed.
-            if old.count != new.count { return Edit(from: from, to: to, notLearned: nil) }       // open ai → OpenAI
-            if new.contains(where: { $0.text.dropFirst().contains(where: \.isUppercase) }) {
+            if old.count != new.count {
+                if unknownOld || unknownNew || innerCapital { return Edit(from: from, to: to, notLearned: nil) }  // open ai → OpenAI
+                return Edit(from: from, to: to,                                                   // every day → everyday
+                            notLearned: "Both spellings are everyday words, so it isn't changed in every dictation")
+            }
+            if innerCapital {
+                if !unknownOld, to == to.uppercased(), from != to {                               // not → NOT
+                    return Edit(from: from, to: to, notLearned: "Capitals for emphasis aren't added in every dictation")
+                }
                 return Edit(from: from, to: to, notLearned: nil)                                  // github → GitHub
             }
             if unknownOld, to.first?.isUppercase == true, from.first?.isLowercase == true {
@@ -181,9 +197,27 @@ public enum EditLearner {
         if old.count == 1, commonWords.contains(oldKey) {
             return Edit(from: from, to: to, notLearned: "“\(from)” is too common to change in every dictation")
         }
-        let nameForWord = from == from.lowercased() && to.first?.isUppercase == true              // cloud → Claude
+        if old.count == 1, new.count == 1 {
+            let (short, long) = oldKey.count < newKey.count ? (oldKey, newKey) : (newKey, oldKey)
+            if long.hasPrefix(short) {
+                let ending = long.dropFirst(short.count)
+                if ["s", "es", "d", "ed", "ing", "ly"].contains(String(ending)) {               // webhook → webhooks
+                    return Edit(from: from, to: to, notLearned: "Only the ending changed, which isn't right in every sentence")
+                }
+                if newKey.count < oldKey.count, ending.count >= 3 {                               // Andersson → Anders
+                    return Edit(from: from, to: to, notLearned: "“\(to)” is the start of “\(from)”, so it looks cut short rather than corrected")
+                }
+            }
+        }
+        // cloud → Claude. Not at the start of a sentence, where any word gets its capital.
+        let nameForWord = from == from.lowercased() && to.first?.isUppercase == true && !startsSentence
         if unknownOld || unknownNew || nameForWord { return Edit(from: from, to: to, notLearned: nil) }
         return Edit(from: from, to: to, notLearned: "Both are everyday words, so it isn't changed in every dictation")
+    }
+
+    private static func isRunTogether(_ word: String) -> Bool {
+        if word.range(of: #"[.!?,;:]\p{Lu}\p{Ll}|[.!?,;:]{2}"#, options: .regularExpression) != nil { return true }
+        return word.filter { ".!?,;:".contains($0) }.count >= 2 && word.contains(where: \.isLowercase)
     }
 
     /// A step that only capitalises an ordinary word at the start of a sentence ("the" → "The").

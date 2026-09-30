@@ -8,9 +8,10 @@ import Foundation
 public enum Rules {
     /// One or more fillers at the start of a sentence: "Um, uh, so I think…".
     private static let fillerAtStart = try! NSRegularExpression(
-        pattern: #"(?:^|(?<=[.!?]\s))(?:(?:Um+|Uh+|Erm|um+|uh+|erm)\b[,.]?\s*)+"#)
+        pattern: #"(?:^|(?<=[.!?]\s))(?:(?:Um+|Uh+|Erm|um+|uh+|erm)\b(?!-)[,.]?\s*)+"#)  // not "Uh-oh"
     private static let fillerMid = try! NSRegularExpression(pattern: #",?\s+(?:um+|uh+|erm)\b,?(?=\s)"#)
-    private static let spaceBeforePunctuation = try! NSRegularExpression(pattern: #"\s+([,.!?])"#)
+    /// " ," or " ." before a space or the end; not the space in "use .NET" or "the .env file".
+    private static let spaceBeforePunctuation = try! NSRegularExpression(pattern: #"\s+([,.!?])(?=\s|$)"#)
     private static let repeatedSpaces = try! NSRegularExpression(pattern: #"[ \t]{2,}"#)
     /// A sentence starts after ". ", "! ", "? " + capital letter, or a new line; "p.m." is not a boundary.
     private static let sentenceStart = try! NSRegularExpression(pattern: #"(?:[.!?]\s+(?=[A-Z])|\n+)"#)
@@ -40,10 +41,15 @@ public enum Rules {
     }
 
     /// Adds "." (or "?" when the last sentence reads as a question) to text of three or more words that ends in a
-    /// letter or digit. Lists are left without a final full stop.
+    /// letter or digit. Lists are left without a final full stop, and so is text ending in an email address or a
+    /// link, where a stray dot gets copied along with it.
     public static func finish(_ text: String) -> String {
-        guard let last = text.last, last.isLetter || last.isNumber, Cleaner.wordCount(text) >= 3 else { return text }
+        let pieces = text.split(whereSeparator: \.isWhitespace)
+        guard let last = text.last, last.isLetter || last.isNumber, pieces.count >= 3, let lastPiece = pieces.last
+        else { return text }
         if text.contains("\n- ") || text.contains("\n1.") { return text }
+        if lastPiece.contains("@") || lastPiece.contains("://") || lastPiece.contains("/")
+            || lastPiece.range(of: #"^[\w-]+(\.[\w-]+)*\.[A-Za-z]{2,}$"#, options: .regularExpression) != nil { return text }
         let starts = sentenceStart.matches(in: text, range: NSRange(text.startIndex..., in: text))
         let lastSentence = starts.last.flatMap { Range($0.range, in: text) }.map { String(text[$0.upperBound...]) } ?? text
         return text + (isQuestion(lastSentence) ? "?" : ".")

@@ -50,6 +50,7 @@ final class Recorder {
     private var capturing = false
     private var activeGeneration: Int?
     private var samples: [Float] = []
+    private var warnedUnreadable = false
 
     /// Starts a recording. Returns at once; `onLive` or `onFailed` follows. `deviceUID` nil = system input.
     func start(deviceUID: String?) {
@@ -61,6 +62,7 @@ final class Recorder {
             samples.reserveCapacity(16_000 * 60)
             capturing = true
             activeGeneration = gen
+            warnedUnreadable = false
         }
         queue.async { [self] in
             coolDown?.cancel()
@@ -160,17 +162,24 @@ final class Recorder {
     private func openEngine() throws {
         let engine = AVAudioEngine()
         let input = engine.inputNode
-        var device = deviceUID.flatMap(Microphones.deviceID(for:))
-        if let id = device, let unit = input.audioUnit {
+        var device: AudioDeviceID?
+        if let deviceUID {
+            // The chosen microphone or nothing. Falling back to the system's input here could land on a virtual
+            // device with no voice (Microsoft Teams Audio is this Mac's default) and record silence.
+            guard let id = Microphones.deviceID(for: deviceUID), let unit = input.audioUnit else {
+                throw VoiceFlowError.audio("Microphone not found. Is it still connected?")
+            }
             var value = id
             let status = AudioUnitSetProperty(unit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0,
                                               &value, UInt32(MemoryLayout<AudioDeviceID>.size))
-            if status != noErr {
-                History.log("could not select microphone \(deviceUID ?? "?"): \(status)")
-                device = nil
+            guard status == noErr else {
+                History.log("could not select microphone \(deviceUID): \(status)")
+                throw VoiceFlowError.audio("Microphone isn't ready yet. Try again in a moment")
             }
+            device = id
+        } else {
+            device = Microphones.defaultInputID()
         }
-        device = device ?? Microphones.defaultInputID()
 
         let reported = input.outputFormat(forBus: 0)
         guard reported.sampleRate > 0, reported.channelCount > 0 else {
@@ -229,7 +238,13 @@ final class Recorder {
     /// Audio thread. Converted either way (cheap), but only kept while recording.
     private func received(_ buffer: AVAudioPCMBuffer, converter: AVAudioConverter) {
         let chunk = Audio.convert(buffer, with: converter)
-        guard !chunk.isEmpty else { return }
+        guard !chunk.isEmpty else {
+            // Sound that can't be converted would otherwise vanish without a trace.
+            if buffer.frameLength > 0, lock.withLock({ () -> Bool in defer { warnedUnreadable = true }; return !warnedUnreadable }) {
+                History.log("microphone audio could not be converted (\(Int(buffer.format.sampleRate)) Hz, \(buffer.format.channelCount) ch); it is being dropped")
+            }
+            return
+        }
         let recording = lock.withLock { () -> Bool in
             if capturing { samples += chunk }
             return capturing
@@ -276,7 +291,10 @@ final class Recorder {
         // Same device, same rate: keep the engine, restarting it in place if the change stopped it.
         let rateNow = device.flatMap(Microphones.sampleRate(of:))
         if rateNow == tapRate {
-            if engine.isRunning { return }
+            if engine.isRunning {
+                History.log("microphone reported a change mid-recording; same rate and still running, so nothing to do")
+                return
+            }
             var startError: Error?
             let problem = VFCatch { do { try engine.start() } catch { startError = error } }
             if problem == nil, startError == nil {
@@ -288,11 +306,13 @@ final class Recorder {
         if Date().timeIntervalSince(lastRestart) > 10 { restarts = 0 }
         restarts += 1
         lastRestart = Date()
+        let began = Date()
         closeEngine()
         do {
             guard restarts <= 3 else { throw VoiceFlowError.audio("microphone kept changing") }
             try openEngineRetrying()
-            History.log("microphone changed (now \(Int(tapRate)) Hz); reopened and kept recording")
+            History.log("microphone changed (now \(Int(tapRate)) Hz); reopened and kept recording, "
+                        + "\(Int(Date().timeIntervalSince(began) * 1000)) ms were not recorded")
         } catch {
             History.log("microphone lost during recording: \(error.localizedDescription)")
             DispatchQueue.main.async {

@@ -5,7 +5,9 @@ import Cocoa
 /// Dictation key gestures (fn by default; see DictationKey):
 /// - Hold the key to talk; release to transcribe.
 /// - Double-tap it to record hands-free; tap it once more to transcribe.
-/// - Esc cancels. A single short tap is discarded, and the key used with another key (fn+arrow, ⌥+e) cancels.
+/// - Esc cancels. A single short tap is discarded, and the key used with another key (fn+arrow, ⌥+e) cancels:
+///   that is a shortcut when the other key comes within a second. Later than that you are dictating and brushed
+///   a key, so the recording carries on (before 2026-09-30 it was thrown away without a word).
 /// Uses listen-only NSEvent monitors (needs Accessibility), so it can never swallow or delay a key press.
 final class FnKeyMonitor {
     private enum State { case idle, holding, awaitingSecondTap, handsFree }
@@ -27,12 +29,14 @@ final class FnKeyMonitor {
     private let escapeKeyCode: UInt16 = 53
     private let tapThreshold: TimeInterval = 0.3
     private let doubleTapWindow: TimeInterval = 0.35
+    private let shortcutWindow: TimeInterval = 1.0
 
     private var state: State = .idle
     private var fnIsDown = false
     private var pressTime = Date()
     private var otherKeyPressed = false
     private var pendingCancel: DispatchWorkItem?
+    private var endedElsewhere: Date?
     private var monitors: [Any] = []
 
     var isActive: Bool { !monitors.isEmpty }
@@ -63,20 +67,31 @@ final class FnKeyMonitor {
             if event.keyCode == escapeKeyCode, state != .idle, isRecording() {
                 resetToIdle()
                 onCancel(true)
-            } else if fnIsDown {
+            } else if fnIsDown, Date().timeIntervalSince(pressTime) < shortcutWindow {
                 otherKeyPressed = true
             }
             return
         }
         guard event.keyCode == key.keyCode else { return }
 
-        let down = event.modifierFlags.contains(key.flag)
+        let down = key.isDown(in: event)
         guard down != fnIsDown else { return }
         fnIsDown = down
         down ? fnPressed() : fnReleased()
     }
 
+    /// The app ended the recording itself (time limit, microphone lost). In hands-free the next press was going
+    /// to stop it, so that one press, if it comes soon, must not start a new recording.
+    func recordingEnded() {
+        if state == .handsFree { endedElsewhere = Date() }
+        resetToIdle()
+    }
+
     private func fnPressed() {
+        if let ended = endedElsewhere {
+            endedElsewhere = nil
+            if Date().timeIntervalSince(ended) < 5 { return }
+        }
         // The recording may have been ended elsewhere (time limit, microphone change).
         if state != .idle && !isRecording() {
             resetToIdle()

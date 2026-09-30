@@ -106,7 +106,14 @@ private struct StatusBadge: View {
         switch state.status {
         case .loading: return (.yellow, "Loading speech model…")
         case .downloading: return (.yellow, "Downloading the speech model…")
-        case .ready: return (.green, "Ready · hold \(state.dictationKey.short) to talk")
+        case .ready:
+            guard state.language == .farsi else { return (.green, "Ready · hold \(state.dictationKey.short) to talk") }
+            switch state.farsiModel {
+            case .ready: return (.green, "Ready · Farsi · hold \(state.dictationKey.short) to talk")
+            case .downloading(let f): return (.yellow, "Downloading the Farsi model… \(Int(f * 100))%")
+            case .failed: return (.red, "Farsi model failed to load")
+            case .loading, .notLoaded: return (.yellow, "Loading the Farsi model…")
+            }
         case .recording: return (.red, "Listening…")
         case .working: return (Brand.blue, "Writing…")
         case .failed(let message): return (.red, message)
@@ -571,6 +578,17 @@ private struct SettingsView: View {
     var body: some View {
         Form {
             Section("Dictation") {
+                Picker(selection: $state.language) {
+                    ForEach(Language.allCases) { language in Text(language.title).tag(language) }
+                } label: {
+                    Text("Language")
+                    Text(state.language == .farsi
+                         ? "Farsi is written in Persian script by Whisper. AI clean-up and learning work in English only, so they're skipped. Your Dictionary still applies."
+                         : "Also in the menu-bar menu. Farsi uses a second speech model (Whisper), loaded once you choose it.")
+                }
+                if state.language == .farsi, let note = farsiNote {
+                    Text(note.text).font(.caption).foregroundStyle(note.color)
+                }
                 Picker(selection: $state.dictationKey) {
                     ForEach(DictationKey.allCases) { key in Text(key.menuTitle).tag(key) }
                 } label: {
@@ -649,6 +667,7 @@ private struct SettingsView: View {
 
             Section("About") {
                 LabeledContent("Speech to text", value: "Parakeet TDT 0.6b v2 · on this Mac")
+                LabeledContent("Farsi speech to text", value: "Whisper large-v3 turbo · on this Mac")
                 LabeledContent("Clean-up", value: state.cleanerRunning ? "SpeakoFlow Mini 0.8B · on this Mac" : "Not running (rules only)")
                 LabeledContent("Privacy", value: "Nothing leaves your Mac")
                 LabeledContent("Version", value: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "dev")
@@ -661,6 +680,18 @@ private struct SettingsView: View {
             Button("Clear History", role: .destructive) { state.clearHistory() }
         } message: {
             Text("This deletes your saved history. It can't be undone.")
+        }
+    }
+}
+
+private extension SettingsView {
+    /// How the Farsi model is doing, under the Language picker (nil once it's ready).
+    var farsiNote: (text: String, color: Color)? {
+        switch state.farsiModel {
+        case .ready, .notLoaded: return nil
+        case .loading: return ("Loading the Farsi model… The first time on a Mac this takes a few minutes while macOS prepares it.", .secondary)
+        case .downloading(let f): return ("Downloading the Farsi model (1.5 GB, once): \(Int(f * 100))%", .secondary)
+        case .failed(let message): return ("Farsi model failed to load: \(message)", .red)
         }
     }
 }

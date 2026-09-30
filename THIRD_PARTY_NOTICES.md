@@ -6,6 +6,8 @@ VoiceFlow's own code is MIT-licensed (see `LICENSE`). It builds on the following
 
 - **FluidAudio** (Apache-2.0), FluidInference: https://github.com/FluidInference/FluidAudio
   Runs the Parakeet speech model on the Neural Engine. Fetched by Swift Package Manager.
+- **WhisperKit** (MIT), Copyright (c) 2024 argmax, inc.: https://github.com/argmaxinc/WhisperKit
+  Runs the Whisper speech model for Farsi. Fetched by Swift Package Manager.
 - **super-voice-assistant** (MIT License with exclusions), Copyright (c) 2025 Super Voice Assistant Contributors:
   https://github.com/ykdojo/super-voice-assistant
   `Sources/VoiceFlow/FnKeyMonitor.swift` is adapted from its fn-key monitor. Its licence excludes the project's
@@ -27,6 +29,9 @@ VoiceFlow's own code is MIT-licensed (see `LICENSE`). It builds on the following
 - **NVIDIA Parakeet TDT 0.6b v2** (CC-BY-4.0), NVIDIA, converted to Core ML by FluidInference:
   https://huggingface.co/FluidInference/parakeet-tdt-0.6b-v2-coreml
   (original: https://huggingface.co/nvidia/parakeet-tdt-0.6b-v2)
+- **OpenAI Whisper large-v3 turbo** (MIT), OpenAI, converted to Core ML by Argmax, for Farsi:
+  https://huggingface.co/argmaxinc/whisperkit-coreml (folder `openai_whisper-large-v3-v20240930_turbo`;
+  original: https://huggingface.co/openai/whisper-large-v3-turbo). Downloaded when Farsi is first chosen.
 - **SpeakoFlow Mini 0.8B** (Apache-2.0), SpeakoFlow, fine-tuned from Qwen3.5-0.8B (Apache-2.0):
   https://huggingface.co/SpeakoFlow/speakoflow-mini
   The clean-up system prompt in `Sources/VoiceFlowCore/Cleaner.swift` is the one the model was trained with,

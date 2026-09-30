@@ -42,7 +42,8 @@ enum Paster {
         down?.post(tap: .cghidEventTap)
         up?.post(tap: .cghidEventTap)
 
-        // Give the app time to read the clipboard before restoring it (slow apps read it late).
+        // Give the app time to read the clipboard before restoring it. A busy app reads it late, and would then
+        // paste your old clipboard instead of the dictation; 1.5 s covers that better than the earlier 0.8 s.
         pendingSaved = saved
         let work = DispatchWorkItem {
             pendingSaved = nil
@@ -51,7 +52,7 @@ enum Paster {
             restore(saved, to: pb)
         }
         pendingRestore = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8, execute: work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5, execute: work)
         return true
     }
 
@@ -64,13 +65,16 @@ enum Paster {
         let data = Unmanaged<CFData>.fromOpaque(pointer).takeUnretainedValue() as Data
         return data.withUnsafeBytes { raw -> CGKeyCode in
             guard let layout = raw.baseAddress?.assumingMemoryBound(to: UCKeyboardLayout.self) else { return fallback }
-            for code in 0..<128 {
-                var deadKeys: UInt32 = 0
-                var length = 0
-                var chars = [UniChar](repeating: 0, count: 4)
-                let status = UCKeyTranslate(layout, UInt16(code), UInt16(kUCKeyActionDown), 0, UInt32(LMGetKbdType()),
-                                            OptionBits(kUCKeyTranslateNoDeadKeysBit), &deadKeys, 4, &length, &chars)
-                if status == noErr, length == 1, chars[0] == UniChar(UnicodeScalar("v").value) { return CGKeyCode(code) }
+            // With ⌘ held first: on "Dvorak – QWERTY ⌘" the key that pastes is not the key that types "v".
+            for modifiers in [UInt32(cmdKey >> 8) & 0xFF, 0] {
+                for code in 0..<128 {
+                    var deadKeys: UInt32 = 0
+                    var length = 0
+                    var chars = [UniChar](repeating: 0, count: 4)
+                    let status = UCKeyTranslate(layout, UInt16(code), UInt16(kUCKeyActionDown), modifiers, UInt32(LMGetKbdType()),
+                                                OptionBits(kUCKeyTranslateNoDeadKeysBit), &deadKeys, 4, &length, &chars)
+                    if status == noErr, length == 1, chars[0] == UniChar(UnicodeScalar("v").value) { return CGKeyCode(code) }
+                }
             }
             return fallback
         }

@@ -52,8 +52,9 @@ public enum Learning {
     @discardableResult
     public static func record(_ edit: EditLearner.Edit, app: String, date: Date = Date(),
                               corrections: inout [Correction], replacements: inout [Replacement]) -> Outcome {
-        // Changed back to what VoiceFlow heard ("Marc" → "mark" while the Dictionary says "mark" → "Marc").
-        if let fix = replacements.first(where: { same($0.to, edit.from) && same($0.from, edit.to) }) {
+        // Changed back to what VoiceFlow heard ("Marc" → "mark" while the Dictionary says "mark" → "Marc"). Making
+        // a capitals-only fix a second time ("github" → "GitHub") is not a change back.
+        if let fix = replacements.first(where: { same($0.to, edit.from) && same($0.from, edit.to) && $0.to != edit.to }) {
             if let i = corrections.firstIndex(where: { $0.status == .learned && same($0.from, fix.from) && $0.to == fix.to }) {
                 replacements.removeAll { $0.id == fix.id }
                 corrections[i].status = .forgotten
@@ -72,7 +73,20 @@ public enum Learning {
         }
         addToDictionary(from: edit.from, to: edit.to, replacements: &replacements)
         upsert(edit, app: app, date: date, status: .learned, note: nil, corrections: &corrections)
+        reconcile(corrections: &corrections, replacements: replacements)
         return .learned
+    }
+
+    /// A learned word whose Dictionary entry was changed (typed over on the Dictionary page, or replaced by a
+    /// newer correction of the same word) no longer counts as learned.
+    public static func reconcile(corrections: inout [Correction], replacements: [Replacement]) {
+        for i in corrections.indices where corrections[i].status == .learned {
+            let c = corrections[i]
+            if !replacements.contains(where: { same($0.from, c.from) && $0.to == c.to }) {
+                corrections[i].status = .forgotten
+                corrections[i].note = "Its Dictionary entry was changed"
+            }
+        }
     }
 
     /// "Learn" on the Corrections page.

@@ -23,11 +23,17 @@ project and is not affiliated with Wispr.
   **Double-tap** for hands-free, **Esc** to cancel.
 - **Fast, accurate speech to text** with NVIDIA Parakeet TDT 0.6b v2 on the Neural Engine: about 30–60 ms for a
   sentence.
+- **Farsi (فارسی)** too: switch the language in the menu-bar menu or Settings, and VoiceFlow writes what you say in
+  Persian script with OpenAI Whisper large-v3 turbo, also on the Neural Engine (about 0.3–1 s per sentence).
 - **AI clean-up** with SpeakoFlow Mini, a small model trained for exactly this job: removes filler words, applies
   your corrections ("no, Friday", "scratch that"), spoken punctuation ("new paragraph"), emails and bullet lists,
   and leaves sentences that were already right untouched. About 0.1–0.4 s per sentence.
-- **Safety net:** when the clean-up model's answer looks wrong (it answered your question, added words, or lost
-  most of a long passage), VoiceFlow types your own words instead.
+- **Pauses are fine:** stop mid-sentence to think or look something up, then carry on. VoiceFlow shortens long
+  pauses before the speech model hears them, because the model otherwise tends to lose the words after one
+  (see *How it works*).
+- **Safety net:** when the clean-up model's answer looks wrong (it answered your question, added words, dropped
+  more than ten words in a row, wrote a number you didn't say, or lost most of a long passage), VoiceFlow types
+  your own words instead.
 - **Dictionary:** fix words it mishears ("git hub" → "GitHub") or make shortcuts.
 - **Learns from your corrections:** fix a wrong word right where VoiceFlow typed it, and it writes it correctly
   from then on. The **Corrections** page lists every word you fixed.
@@ -38,7 +44,7 @@ project and is not affiliated with Wispr.
 
 ## Download (easiest)
 
-For a Mac with **Apple Silicon** (M1 or newer) and **macOS 14 Sonoma** or newer. English speech only for now.
+For a Mac with **Apple Silicon** (M1 or newer) and **macOS 14 Sonoma** or newer. English speech; Farsi is in builds from source until the next release.
 
 1. Download **VoiceFlow-1.1.0-macOS-arm64.zip** from the
    [latest release](https://github.com/Kashanvari/VoiceFlow/releases/latest) (12 MB).
@@ -113,10 +119,29 @@ Then click into any text box, hold fn, wait for the dot in the bubble to turn **
 | Hold the key, speak, let go | Records while held, then types the cleaned-up text at the cursor |
 | Double-tap the key | Hands-free: keeps recording until you tap the key again |
 | **Esc** while recording | Cancels, nothing is typed |
-| The key together with another key (fn+←, ⌥+e…) | Cancels, so normal shortcuts still work |
+| The key together with another key (fn+←, ⌥+e…) in the first second | Cancels, so normal shortcuts still work. Later in a recording, other keys are ignored |
+| Press the key again while the last dictation is still being written | Starts the next one straight away; the texts arrive in order |
 
 The bubble at the bottom of the screen shows a **grey dot** while the microphone starts and a **red dot** when it
 is listening. Bluetooth microphones take a moment to wake up, so start talking when the dot is red.
+
+After you let go, VoiceFlow keeps listening for a quarter of a second (0.4 s with a Bluetooth microphone), because
+the microphone's sound arrives slightly late and the last word was otherwise cut short. If the text box already
+has text right before the cursor, a space goes in front of the new dictation.
+
+### Speaking Farsi
+
+Click the VoiceFlow logo in the menu bar and choose **Farsi (فارسی)** (or Settings → Language). The choice stays
+until you switch back to English. While Farsi is on, the bubble shows **فا** next to the dot.
+
+- The first time you choose Farsi, VoiceFlow loads a second speech model, Whisper large-v3 turbo (1.5 GB; the
+  downloaded app fetches it once). The very first load on a Mac takes a long time, up to half an hour, while
+  macOS prepares it for the Neural Engine; after that it loads in under a second.
+- Farsi comes out in Persian script, with Persian ی and ک and the punctuation ، ؟ ؛.
+- The AI clean-up and learning from corrections work in English only, so they are skipped for Farsi. Your
+  Dictionary still applies, so you can add Farsi words Whisper gets wrong.
+- Measured on 28 clips of everyday spoken Farsi (C1Tech/Persian-ASR-Benchmark): about 8% of letters wrong, mostly
+  words that sound alike but are spelled differently (قتل / قطع) and joined or split words (میزنه / می زنه).
 
 **The window** (Dock icon, or the VoiceFlow logo in the menu bar → Open VoiceFlow):
 - **Home:** status, stats and your searchable history, with "copy" and "copy without clean-up" on each entry.
@@ -124,7 +149,7 @@ is listening. Bluetooth microphones take a moment to wake up, so start talking w
   AI clean-up. A shortcut fires every time you say its words, so choose words you wouldn't say by accident.
 - **Corrections:** the words you fixed after dictating, whether each was learned, and how often VoiceFlow has
   written it right for you since. **Forget** takes a word out of the Dictionary; **Learn** adds one that wasn't.
-- **Settings:** dictation key, AI clean-up, sounds, microphone, keep-the-mic-ready, permissions, open at login,
+- **Settings:** language, dictation key, AI clean-up, sounds, microphone, keep-the-mic-ready, permissions, open at login,
   clear history.
 
 Closing the window keeps VoiceFlow running in the menu bar, so the dictation key keeps working.
@@ -132,39 +157,63 @@ Closing the window keeps VoiceFlow running in the menu bar, so the dictation key
 ### Learning from your corrections
 
 After a dictation, VoiceFlow watches that text box for a few minutes. If you fix a word it got wrong ("mark" →
-"Marc"), it notices and adds the fix to your Dictionary, so the next dictation gets it right. The watch ends when
-you dictate again, when the text is gone (a chat message was sent), 30 seconds after your last edit, or after
-5 minutes.
+"Marc"), it notices and adds the fix to your Dictionary, so the next dictation gets it right. Up to six
+dictations in the same app are watched together, so you can dictate a message in several takes and proofread at
+the end. A watch ends when the text is gone (a chat message was sent), 30 seconds after your last edit, 90 seconds
+after the last dictation if you changed nothing, or after 5 minutes.
 
 - **Learned:** a word that isn't ordinary English, like a name or a mis-spelling ("wisper" → "Wispr"), a name
   written as an everyday word ("cloud" → "Claude"), and joined-up or capitalised spelling ("open ai" → "OpenAI",
   "github" → "GitHub").
-- **Listed, not learned:** edits between two everyday words ("meeting" → "meetings", "to" → "two"), because a
-  Dictionary entry changes that word in every dictation. Press **Learn** if one is always wrong.
-- **Ignored:** words you add or delete, rewording ("big" → "large"), punctuation, and capitals at the start of a
-  sentence.
+- **Listed, not learned:** edits between two everyday words ("meeting" → "meetings", "to" → "two", "every day" →
+  "everyday"), capitals for emphasis ("not" → "NOT"), a changed ending ("webhook" → "webhooks") and a word cut
+  short, because a Dictionary entry changes that word in every dictation. Press **Learn** if one is always wrong.
+- **Ignored:** words you add or delete, rewording ("big" → "large"), punctuation, capitals at the start of a
+  sentence, and text that ran together without a space.
 - **Changed your mind?** Change a learned word back and VoiceFlow forgets it.
 
 It works in apps that share their text box through Accessibility, which includes the Claude app and TextEdit;
 most web browsers don't yet. The text is read on your Mac, only held in memory while watching, and never saved:
 only the corrected word pairs are kept, in `data/corrections.json`. Switch it off in Settings → "Learn from my
-corrections".
+corrections". (Separately, just before pasting, VoiceFlow looks at the one character before the cursor to decide
+whether a space is needed; that happens with learning off too, and nothing is kept.)
 
 ## How it works
 
 ```
 hold key ─► microphone (AVAudioEngine on a background queue, converted to 16 kHz mono)
-let go  ─► Parakeet TDT 0.6b v2 via FluidAudio (Neural Engine)            models/parakeet-tdt-0.6b-v2-coreml
+let go  ─► 0.25 s more of sound (0.4 s over Bluetooth), so the last word is whole
+        ─► pauses longer than 0.6 s shortened; cut in pauses into pieces   Sources/VoiceFlowCore/Pauses.swift
+           of at most 13.5 s
+        ─► Parakeet TDT 0.6b v2 via FluidAudio (Neural Engine), piece by   models/parakeet-tdt-0.6b-v2-coreml
+           piece; a piece that comes back empty is tried again
         ─► Dictionary replacements                                         data/dictionary.json
         ─► Rules: drop "um", "uh", "erm"                                    Sources/VoiceFlowCore/Rules.swift
         ─► SpeakoFlow Mini 0.8B in llama.cpp's llama-server (GPU)          models/cleanup
            in pieces of about 120 words, each checked by the safety net
         ─► final full stop or question mark
+        ─► a space in front if the cursor sits right after other text
         ─► paste: clipboard + ⌘V, then your previous clipboard is restored
+
+Farsi:
+let go  ─► long pauses shortened (as above)
+        ─► Whisper large-v3 turbo via WhisperKit (Neural Engine)   models/whisperkit/openai_whisper-large-v3-v20240930_turbo
+        ─► Dictionary replacements
+        ─► Persian letters and punctuation, made-up "subtitle" lines removed   Sources/VoiceFlowCore/FarsiTranscriber.swift
+        ─► paste
 ```
 
+- **Why pauses are shortened.** Measured on 2026-09-30 with macOS's built-in voices and FluidAudio 0.8.2: when
+  a recording held a long pause followed by a short phrase (a number, say), Parakeet lost the phrase in
+  119 of 504 test clips; a short phrase on its own came back empty for 23 of 220; and recordings over 15 s went
+  through overlapping windows that could garble a word on a window edge. With pauses cut to 0.6 s, a little
+  quiet "room tone" around each piece, and a second try for a piece that comes back empty, the phrase after the
+  pause is kept in all 504 clips and none of the 220 short phrases comes back empty; long continuous speech is
+  unchanged (16 word errors before and after on the long test clips). `VoiceFlowCheck --pauses` runs 97 clips of
+  the same kinds. Real voices and rooms differ from
+  test voices, so the log records how much of each recording was speech and how loud it was.
 - VoiceFlow starts `llama-server` itself on `127.0.0.1` (local only; port 8790 for a build from source, 8792 for the
-  downloaded app) and stops it when it quits. The downloaded
+  downloaded app), with a random key so that only VoiceFlow can use it, and stops it when it quits. The downloaded
   app carries its own copy of llama.cpp; a build from source uses Homebrew's. If llama.cpp or the clean-up model is
   missing, VoiceFlow still works with the rules-only clean-up.
 - History is stored as text only (no audio) in `data/history.jsonl`, corrections in `data/corrections.json`, with
@@ -178,7 +227,11 @@ let go  ─► Parakeet TDT 0.6b v2 via FluidAudio (Neural Engine)            mo
 |---|---|
 | Tapping fn opens the emoji picker | System Settings → Keyboard → "Press 🌐 key to" → Do Nothing (VoiceFlow → Home has a button to that page) |
 | Nothing happens when I hold the key | Accessibility permission: switch VoiceFlow off and on in Privacy & Security → Accessibility |
-| The bubble says "Didn't catch that" every time | The Microphone permission belongs to an older build: switch VoiceFlow off and on in Privacy & Security → Microphone (or set up the signing certificate above) |
+| The bubble says "The microphone heard nothing · is it muted?" every time | The microphone delivered silence. Check it isn't muted; if it happens after installing a new build, the Microphone permission belongs to the older build: switch VoiceFlow off and on in Privacy & Security → Microphone (or set up the signing certificate above) |
+| "The microphone sent no sound · try again" | The microphone opened but delivered nothing (a headset still connecting, or a virtual device). Try again, or pick another microphone in Settings |
+| "Didn't catch that" | VoiceFlow heard sound but no words. Speak after the dot turns red; `logs/voiceflow.log` shows how much speech it found and how loud it was |
+| "Microphone not found. Is it still connected?" | The microphone chosen in Settings isn't connected. Reconnect it, or choose Automatic |
+| Words go missing in a long dictation | Open **Home** and compare "copy" with "copy without clean-up". If the words are in the second, the AI clean-up dropped them; if they are in neither, the speech model did. `VoiceFlowCheck --hear recording.wav` shows what the speech model hears in a saved recording |
 | "No real microphone" | Mac minis and Mac Studios have no built-in mic. Connect AirPods, a headset or a USB microphone |
 | The first words get cut off with AirPods | Wait for the red dot. Keep "Keep the microphone ready" on (Settings) so the next dictation starts instantly |
 | Music sounds like a phone call after dictating | That's AirPods in call mode while the mic is kept ready (30 s). Switch off "Keep the microphone ready" in Settings |
@@ -188,10 +241,14 @@ let go  ─► Parakeet TDT 0.6b v2 via FluidAudio (Neural Engine)            mo
 ## Development
 
 ```bash
-swift run -c release VoiceFlowCheck --rules   # instant tests: rules, dictionary, splitting, safety net, learning
+swift run -c release VoiceFlowCheck --rules   # instant tests: rules, dictionary, splitting, safety net, learning, pause cutting
 swift run -c release VoiceFlowCheck --cases   # 32 test sentences through the real clean-up model
+swift run -c release VoiceFlowCheck --pauses  # 97 spoken clips with pauses and short phrases through the speech model
+swift run -c release VoiceFlowCheck --hear clip.wav …   # what the speech model hears in a recording, and how it was cut
+swift run -c release VoiceFlowCheck --farsi clip.wav …  # Farsi recordings through Whisper (clip.txt beside it = word error rate)
 swift run -c release VoiceFlowCheck           # speaks test sentences with macOS `say` and runs the whole pipeline
 open ~/Applications/VoiceFlow.app --args --record-test   # records three clips back to back and logs timings
+open -n ~/Applications/VoiceFlow.app --args --dictate-test  # dry run of two back-to-back dictations and one with a long pause (nothing pasted)
 open -n ~/Applications/VoiceFlow.app --args --learn-test  # with a TextEdit document open: paste, correct, learn (dry run)
 open -n ~/Applications/VoiceFlow.app --args --ax-probe    # which open apps share their focused text box (no text logged)
 ```
@@ -205,11 +262,14 @@ open -n ~/Applications/VoiceFlow.app --args --ax-probe    # which open apps shar
 | `experiments/cleanup-model-test` | The comparison that picked SpeakoFlow Mini over BitVoice (28 vs 16 of 32) |
 | `scripts/` | `setup.sh`, and `make_icon.swift`, which draws the app icon and the menu-bar icon from `Resources/Logo.png` |
 
-Known limitations in 1.0: English only; spoken numbered lists ("number one, …") are not turned into lists; no
-per-app tone or context awareness yet.
+Known limitations: the AI clean-up is English only (Farsi gets Whisper's own punctuation); spoken numbered lists ("number one, …") are not turned into lists; no
+per-app tone or context awareness yet; words spoken before the dot turns red are not recorded; a number changed
+by the clean-up model ("64" → "63") is caught only when the dictation has no numbers written out as words; and
+the pause handling was measured with FluidAudio 0.8.2, which is several versions behind (an upgrade needs the
+measurements repeated).
 
 ## Licence
 
 VoiceFlow is MIT-licensed (see `LICENSE`). The models and libraries it uses have their own licences, listed in
 `THIRD_PARTY_NOTICES.md`: Parakeet TDT 0.6b v2 is CC-BY-4.0 (NVIDIA), SpeakoFlow Mini is Apache-2.0, FluidAudio is
-Apache-2.0, llama.cpp is MIT.
+Apache-2.0, llama.cpp is MIT, Whisper (OpenAI) and WhisperKit (Argmax) are MIT.

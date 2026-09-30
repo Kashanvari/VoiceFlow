@@ -13,6 +13,7 @@ final class Indicator {
         /// False while the microphone is still starting (grey dot), true once it hears you (red dot).
         @Published var live = false
         @Published var keyName = "fn"
+        @Published var languageTag: String?
     }
 
     private let model = Model()
@@ -20,6 +21,11 @@ final class Indicator {
     var keyName: String {
         get { model.keyName }
         set { model.keyName = newValue }
+    }
+    /// "فا" while dictating in Farsi (nil for English), shown next to the dot.
+    var languageTag: String? {
+        get { model.languageTag }
+        set { model.languageTag = newValue }
     }
     private let panel: NSPanel
     private var hideWork: DispatchWorkItem?
@@ -63,6 +69,9 @@ final class Indicator {
         }
     }
 
+    /// Nothing is showing, so a short message won't cover anything.
+    var isFree: Bool { model.mode == .hidden }
+
     /// The microphone is on: the dot turns red.
     func setLive(_ on: Bool) {
         model.live = on
@@ -94,6 +103,9 @@ final class Indicator {
                 case .listening(let handsFree):
                     Circle().fill(model.live ? Color.red : Color.gray).frame(width: 8, height: 8)
                         .animation(.easeOut(duration: 0.15), value: model.live)
+                    if let tag = model.languageTag {
+                        Text(tag).font(.system(size: 12, weight: .semibold))
+                    }
                     if !model.live {
                         Text("Starting mic…").font(.system(size: 11, weight: .medium)).foregroundStyle(.white.opacity(0.7))
                     }

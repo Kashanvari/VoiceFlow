@@ -4,6 +4,7 @@ import ApplicationServices
 import VoiceFlowCore
 
 /// Runs the app: hold fn → record → Parakeet → Dictionary → Rules + SpeakoFlow clean-up → paste at the cursor.
+/// With the language set to Farsi: record → Whisper → Dictionary → Farsi.tidy → paste.
 /// Has a window (Home, Dictionary, Settings), a Dock icon and a menu-bar icon.
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
@@ -12,6 +13,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let state = AppState()
     private lazy var window = MainWindow(state: state)
     private let transcriber = Transcriber()
+    private let farsi = FarsiTranscriber()
     private let cleaner = Cleaner(port: AppDelegate.cleanerPort)
 
     /// Each kind of VoiceFlow gets its own clean-up port, so they never stop each other's server: a build from
@@ -29,12 +31,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private var phase: Phase = .loading { didSet { phaseChanged() } }
     private var loadError: String?
-    private var recordingApp = ""
     private var recordingLimit: DispatchWorkItem?
     private var lastText: String?
     private var lastRaw: String?
-    private var micLive = false
     private var recordingPressed = Date()
+    /// The recording in progress: what is fixed when it starts.
+    private var take = Take(app: "?", language: .english, tail: 0.25)
+    /// The recording whose key was just released, still catching its last moment of sound.
+    private var tail: (take: Take, work: DispatchWorkItem)?
+    /// Dictations being written (heard, tidied, pasted), and the latest of them: each waits for the one before,
+    /// so they are pasted in the order they were spoken.
+    private var writing = 0
+    private var lastWrite: Task<Void, Never>?
+    /// "Learned: …", kept until the bubble is free.
+    private var pendingNote: String?
+    private var lastCleanerStart = Date.distantPast
+    /// --dictate-test: everything but the paste, the history entry and the clean-up server.
+    private var dryRun = false
+
+    private struct Take {
+        let app: String
+        let language: Language
+        /// How long to keep recording after the key is released.
+        let tail: Double
+        var handsFree = false
+        /// When the microphone started delivering sound (nil: it never did).
+        var live: Date?
+    }
 
     private let maxRecordingSeconds: Double = 10 * 60
 
@@ -47,6 +70,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if CommandLine.arguments.contains("--selftest") { selfTest(); return }
         if CommandLine.arguments.contains("--ax-probe") { axProbe(); return }
         if CommandLine.arguments.contains("--learn-test") { learnTest(); return }
+        if CommandLine.arguments.contains("--dictate-test") { dictateTest(); return }
 
         NSApp.setActivationPolicy(.regular)
         NSApp.mainMenu = makeMainMenu()
@@ -62,11 +86,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         recorder.onLive = { [weak self] in self?.microphoneLive() }
         recorder.onFailed = { [weak self] message in self?.microphoneFailed(message) }
         recorder.onInterrupted = { [weak self] in
-            History.log("microphone changed during recording; finishing early")
-            self?.finishRecording()
+            guard let self, self.phase == .recording else { return }
+            History.log("microphone lost during recording; writing what was heard so far")
+            self.fnKeys.recordingEnded()
+            self.finishRecording()
+            self.indicator.show(.message("Microphone disconnected · writing what I heard"), hideAfter: 2.5)
         }
         fnKeys.onStart = { [weak self] in self?.startRecording() ?? false }
-        fnKeys.onHandsFree = { [weak self] in self?.indicator.show(.listening(handsFree: true)) }
+        fnKeys.onHandsFree = { [weak self] in
+            self?.take.handsFree = true
+            self?.indicator.show(.listening(handsFree: true))
+        }
         fnKeys.onFinish = { [weak self] in self?.finishRecording() }
         fnKeys.onCancel = { [weak self] byUser in self?.cancelRecording(byUser: byUser) }
         fnKeys.isRecording = { [weak self] in self?.recorder.isRecording ?? false }
@@ -74,9 +104,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         editWatcher.onFinished = { [weak self] pasted, now, app in
             guard let self, self.state.learnFromEdits else { return }
             let learned = self.state.learn(pasted: pasted, now: now, app: app)
-            if !learned.isEmpty, self.phase == .ready {
-                self.indicator.show(.message("Learned: \(learned.joined(separator: ", "))"), hideAfter: 1.8)
-            }
+            guard !learned.isEmpty else { return }
+            // Most watches end as the next dictation starts, when the bubble is busy: say it afterwards.
+            self.pendingNote = "Learned: \(learned.joined(separator: ", "))"
+            if self.phase == .ready { self.showPendingNote() }
         }
         state.onLearnFromEditsChanged = { [weak self] on in if !on { self?.editWatcher.cancel() } }
         indicator.keyName = state.dictationKey.short
@@ -84,6 +115,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self?.fnKeys.key = key
             self?.indicator.keyName = key.short
         }
+        indicator.languageTag = state.language.tag
+        state.onLanguageChanged = { [weak self] language in self?.languageChanged(language) }
 
         // Accessibility: macOS shows its prompt once; AppState re-checks every 2 s and tells us when it's on.
         state.onAccessibilityGranted = { [weak self] in
@@ -100,6 +133,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if AVCaptureDevice.authorizationStatus(for: .audio) == .notDetermined { state.requestMicrophone() }
 
         loadModels()
+        if state.language == .farsi { loadFarsi() }
         window.show()
         History.log("VoiceFlow started (accessibility \(AXIsProcessTrusted() ? "on" : "off"), microphone "
                     + "\(AVCaptureDevice.authorizationStatus(for: .audio) == .authorized ? "allowed" : "not allowed"))")
@@ -150,10 +184,58 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             try? await Task.sleep(nanoseconds: 800_000_000)
             let front = NSWorkspace.shared.frontmostApplication?.localizedName ?? "?"
             let pasted = Paster.paste("VoiceFlow paste test: Let's meet on Friday at noon.")
-            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            try? await Task.sleep(nanoseconds: 2_200_000_000)  // the clipboard goes back after 1.5 s
             let after = NSPasteboard.general.string(forType: .string)
             History.log("paste test: front app \(front), accessibility \(pasted ? "on" : "off"), "
-                        + "clipboard \(after == before ? "restored" : "NOT restored (\(after ?? "nil"))")")
+                        + "clipboard \(after == before ? "restored" : "NOT restored (\(after?.count ?? 0) characters on it)")")
+            History.flush()
+            NSApp.terminate(nil)
+        }
+    }
+
+    /// `open -n VoiceFlow.app --args --dictate-test`: a dry run of whole dictations without the key and without
+    /// pasting. Records 1.5 s from the microphone the way a key press does, lets go, starts the next recording at
+    /// once (while the first is still catching its last moment), then writes a spoken test sentence with a
+    /// 12-second pause before its last words. Logs each step (word counts only for the microphone) and quits.
+    private func dictateTest() {
+        NSApp.setActivationPolicy(.accessory)
+        dryRun = true
+        recorder.onLive = { [weak self] in self?.microphoneLive() }
+        recorder.onFailed = { [weak self] message in self?.microphoneFailed(message) }
+        Task {
+            do {
+                try await transcriber.load()
+                phase = .ready
+                let permission = AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
+                History.log("dictate test: microphone \(state.activeMicrophone?.name ?? "none"), "
+                            + "permission \(permission ? "allowed" : "not allowed"), language \(state.language.rawValue)")
+                let first = startRecording()
+                try await Task.sleep(nanoseconds: 1_500_000_000)
+                finishRecording()
+                let second = startRecording()
+                try await Task.sleep(nanoseconds: 1_000_000_000)
+                finishRecording()
+                try await Task.sleep(nanoseconds: 700_000_000)
+                await lastWrite?.value
+                History.log("dictate test: recordings started \(first) and \(second); afterwards \(phase), \(writing) still being written")
+
+                let file = FileManager.default.temporaryDirectory.appendingPathComponent("voiceflow-dictate-test.aiff")
+                var spoken: [[Float]] = []
+                for sentence in ["Please send the report to the whole team. The table is on page", "forty two"] {
+                    let say = Process()
+                    say.executableURL = URL(fileURLWithPath: "/usr/bin/say")
+                    say.arguments = ["-o", file.path, sentence]
+                    try say.run()
+                    say.waitUntilExit()
+                    spoken.append(try Audio.load(file))
+                }
+                try? FileManager.default.removeItem(at: file)
+                let samples = spoken[0] + [Float](repeating: 0, count: 12 * 16_000) + spoken[1]
+                await write(samples, Take(app: "test", language: .english, tail: 0), dictionary: [], useModel: false)
+            } catch {
+                History.log("dictate test FAILED: \(error.localizedDescription)")
+            }
+            recorder.shutdown()
             History.flush()
             NSApp.terminate(nil)
         }
@@ -287,12 +369,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         startCleaner()
     }
 
+    /// Loads Whisper for Farsi (downloading it first in the ready-made app). Only once Farsi is chosen.
+    private func loadFarsi() {
+        switch state.farsiModel {
+        case .loading, .downloading, .ready: return
+        case .notLoaded, .failed: break
+        }
+        state.farsiModel = .loading
+        Task {
+            let started = Date()
+            do {
+                try await farsi.load(onDownload: { [weak self] fraction in
+                    Task { @MainActor in
+                        guard let self, fraction < 1 else { self?.state.farsiModel = .loading; return }
+                        self.state.farsiModel = .downloading(fraction)
+                    }
+                })
+                state.farsiModel = .ready
+                History.log("Farsi model ready in \(Int(Date().timeIntervalSince(started) * 1000)) ms")
+            } catch {
+                state.farsiModel = .failed(error.localizedDescription)
+                History.log("Farsi model failed: \(error)")
+            }
+        }
+    }
+
+    private func languageChanged(_ language: Language) {
+        if language == .farsi { loadFarsi() }
+        History.log("language: \(language.rawValue)")
+        // A recording in progress keeps the language it started in, and its bubble stays up.
+        guard phase != .recording else { return }
+        indicator.languageTag = language.tag
+        let note = language == .farsi && state.farsiModel != .ready ? " · loading the model…" : ""
+        indicator.show(.message("Dictating in \(language.title)\(note)"), hideAfter: 1.6)
+    }
+
     private var cleanerStarting = false
 
     /// Starts (or restarts) the clean-up server. Settings shows whether it is running.
     private func startCleaner() {
         guard !cleanerStarting else { return }
         cleanerStarting = true
+        lastCleanerStart = Date()
         state.cleanerRunning = false
         Task {
             do {
@@ -363,13 +481,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             indicator.show(.message(loadError == nil ? "Still loading the speech model…" : "Speech model failed to load"),
                            hideAfter: 2)
             return false
-        case .working:
-            indicator.show(.message("Still writing the last one…"), hideAfter: 1.2)
-            return false
         case .recording:
             return true
-        case .ready:
+        case .ready, .working:  // while the last dictation is still being written, the next one can start
             break
+        }
+        if state.language == .farsi {
+            switch state.farsiModel {
+            case .ready: break
+            case .failed:
+                indicator.show(.message("Farsi model failed to load: see Settings"), hideAfter: 2.5)
+                return false
+            case .downloading(let fraction):
+                indicator.show(.message("Downloading the Farsi model… \(Int(fraction * 100))%"), hideAfter: 2)
+                return false
+            case .notLoaded, .loading:
+                loadFarsi()
+                indicator.show(.message("Still loading the Farsi model…"), hideAfter: 2)
+                return false
+            }
         }
         guard AVCaptureDevice.authorizationStatus(for: .audio) == .authorized else {
             indicator.show(.message("Allow the microphone in VoiceFlow → Settings"), hideAfter: 3)
@@ -377,31 +507,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return false
         }
         let mic = state.activeMicrophone
-        guard let mic, !mic.isVirtual else {
+        guard let mic, !mic.isVirtual || dryRun else {  // the dry run also runs on a Mac with no real microphone
             indicator.show(.message(mic == nil ? "No microphone connected" : "No real microphone: connect AirPods or a headset"),
                            hideAfter: 3)
             return false
         }
+        collectTail()  // the last recording was still catching its final moment: it ends here
+
         // The mic opens in the background and `microphoneLive` turns the dot red. The bubble appears after
         // 0.12 s, so a quick fn+arrow shortcut doesn't flash it.
         phase = .recording
-        micLive = false
         let pressed = Date()
         recordingPressed = pressed
-        recordingApp = NSWorkspace.shared.frontmostApplication?.localizedName ?? "?"
-        let front = NSWorkspace.shared.frontmostApplication?.processIdentifier
-        editWatcher.prepare(pid: state.learnFromEdits && front != getpid() ? front : nil)
+        let front = NSWorkspace.shared.frontmostApplication
+        take = Take(app: front?.localizedName ?? "?", language: state.language, tail: mic.isBluetooth ? 0.4 : 0.25)
+        indicator.languageTag = take.language.tag
+        // Ask the app to share its text now (apps built on web pages take a moment), for the space before the
+        // next paste and for learning.
+        if let pid = front?.processIdentifier, pid != getpid() { editWatcher.prepare(pid: pid) }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { [weak self] in
             guard let self, self.phase == .recording, self.recordingPressed == pressed else { return }
-            self.indicator.show(.listening(handsFree: false))
-            if self.micLive { self.indicator.setLive(true) }
+            self.indicator.show(.listening(handsFree: self.take.handsFree))
+            if self.take.live != nil { self.indicator.setLive(true) }
         }
         recorder.keepWarmSeconds = state.keepMicReady ? 30 : 0
         recorder.start(deviceUID: mic.id)
 
         let limit = DispatchWorkItem { [weak self] in
-            self?.indicator.show(.message("10-minute limit reached"), hideAfter: 2)
-            self?.finishRecording()
+            guard let self, self.phase == .recording else { return }
+            History.log("10-minute limit reached")
+            self.fnKeys.recordingEnded()
+            self.finishRecording()
+            self.indicator.show(.message("10-minute limit reached · writing it now"), hideAfter: 2.5)
         }
         recordingLimit = limit
         DispatchQueue.main.asyncAfter(deadline: .now() + maxRecordingSeconds, execute: limit)
@@ -410,7 +547,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func microphoneLive() {
         guard phase == .recording else { return }
-        micLive = true
+        take.live = Date()
         indicator.setLive(true)
         // The start sound waits until the key has been held 0.2 s, so shortcuts like fn+arrow stay silent.
         let pressed = recordingPressed
@@ -425,7 +562,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func microphoneFailed(_ message: String) {
         guard phase == .recording else { return }
         recordingLimit?.cancel()
-        phase = .ready
+        fnKeys.recordingEnded()
+        settle()
         indicator.show(.message(message), hideAfter: 3)
         History.log("recording failed: \(message)")
     }
@@ -434,77 +572,172 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard phase == .recording else { return }
         recordingLimit?.cancel()
         recorder.cancel()
-        phase = .ready
+        let seconds = Date().timeIntervalSince(recordingPressed)
+        if seconds > 1 {
+            History.log("recording of \(String(format: "%.1f", seconds)) s discarded: "
+                        + (byUser ? "Esc" : "\(state.dictationKey.short) was used with another key"))
+        }
+        settle()
         indicator.show(byUser ? .message("Cancelled") : .hidden, hideAfter: byUser ? 0.8 : nil)
     }
 
+    /// The key was released. The microphone's sound arrives a moment late (a tenth of a second of buffering, more
+    /// over Bluetooth), so the recording runs on for `take.tail` before it is written; stopping at once cut the
+    /// last word short (measured 2026-09-30: 0.3 s missing was enough to lose it).
     private func finishRecording() {
         guard phase == .recording else { return }
         recordingLimit?.cancel()
-        let samples = recorder.stop()
-        let seconds = Double(samples.count) / 16_000
-        if state.sounds { NSSound(named: "Pop")?.play() }
-
-        guard seconds >= 0.3 else {
-            phase = .ready
-            if micLive { indicator.show(.hidden) } else { indicator.show(.message("Hold \(state.dictationKey.short) until the dot turns red"), hideAfter: 1.8) }
-            return
-        }
         phase = .working
         indicator.show(.working)
+        let work = DispatchWorkItem { [weak self] in self?.collectTail() }
+        tail = (take, work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + take.tail, execute: work)
+    }
 
-        let useModel = state.aiCleanup && state.cleanerRunning
-        let dictionary = state.replacements
-        let app = recordingApp
-        Task {
-            let t0 = Date()
-            var raw = ""
-            do {
-                raw = try await transcriber.transcribe(samples)
-            } catch {
-                History.log("transcription failed: \(error)")
-            }
-            let speechMs = Int(Date().timeIntervalSince(t0) * 1000)
+    /// Ends the recording that was catching its last moment of sound, and writes it.
+    private func collectTail() {
+        guard let (take, work) = tail else { return }
+        work.cancel()
+        tail = nil
+        let samples = recorder.stop()
+        if state.sounds { NSSound(named: "Pop")?.play() }
+        let seconds = Double(samples.count) / 16_000
 
-            guard !raw.isEmpty else {
-                phase = .ready
-                indicator.show(.message("Didn't catch that"), hideAfter: 1.2)
-                return
-            }
-            let corrected = Replacements.apply(raw, dictionary)
-            state.countAutoFixes(in: raw)
-            let cleaned = await cleaner.clean(corrected, useModel: useModel)
-            let text = Rules.finish(cleaned.text)
-            if useModel, cleaned.fallbackReason?.contains("model error") == true, await !cleaner.isHealthy() {
-                History.log("clean-up server stopped answering; restarting it")
-                startCleaner()
-            }
-            // Only "um" was said, or a Dictionary entry replaced everything with nothing: pasting "" would
-            // delete whatever is selected in the other app.
-            guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-                phase = .ready
-                indicator.show(.message("Didn't catch that"), hideAfter: 1.2)
-                return
-            }
-
-            let pasted = Paster.paste(text)
-            if pasted, state.learnFromEdits, let front = NSWorkspace.shared.frontmostApplication,
-               front.processIdentifier != getpid() {
-                editWatcher.watch(pasted: text, app: front.localizedName ?? app, pid: front.processIdentifier)
-            }
-            lastText = text
-            lastRaw = raw
-            phase = .ready
-            indicator.show(pasted ? .hidden : .message("Copied · press ⌘V to paste"), hideAfter: pasted ? nil : 2.5)
-
-            let entry = History.Entry(date: Date(), app: app, raw: raw, text: text, cleanupNote: cleaned.fallbackReason,
-                                      audioSeconds: (seconds * 10).rounded() / 10, speechMs: speechMs,
-                                      cleanupMs: cleaned.milliseconds)
-            History.append(entry)
-            state.add(entry)
-            History.log("\(String(format: "%.1f", seconds)) s → speech \(speechMs) ms, clean-up \(cleaned.milliseconds) ms"
-                        + (cleaned.fallbackReason.map { " (rules only: \($0))" } ?? ""))
+        // Sound that went missing on the way (the microphone stalled, was reopened, or sent nothing at all) shows
+        // up as a shortfall.
+        let held = take.live.map { Date().timeIntervalSince($0) } ?? 0
+        if held - seconds > 1 {
+            History.log("microphone delivered \(String(format: "%.1f", seconds)) s of \(String(format: "%.1f", held)) s")
         }
+        guard seconds >= 0.3 else {
+            settle()
+            if take.live == nil {
+                note(.message("Hold \(state.dictationKey.short) until the dot turns red"), hideAfter: 1.8)
+            } else if held > 1 {
+                note(.message("The microphone sent no sound · try again"), hideAfter: 3)
+            } else {
+                note(.hidden)  // a quick tap
+            }
+            return
+        }
+        if state.aiCleanup, !state.cleanerRunning, !dryRun, Date().timeIntervalSince(lastCleanerStart) > 60 {
+            startCleaner()  // it failed to start earlier (port busy, a crash): try again for the next dictation
+        }
+
+        writing += 1
+        let previous = lastWrite
+        let useModel = state.aiCleanup && state.cleanerRunning && take.language == .english
+        let dictionary = state.replacements
+        lastWrite = Task {
+            await previous?.value
+            await write(samples, take, dictionary: dictionary, useModel: useModel)
+            writing -= 1
+            settle()
+        }
+    }
+
+    /// After a recording or a write ends: back to ready, unless another recording or write is going on.
+    private func settle() {
+        if phase == .recording, recorder.isRecording { return }
+        phase = writing > 0 || tail != nil ? .working : .ready
+        if phase == .ready { showPendingNote() }
+    }
+
+    /// Changes the bubble, but never while you are recording the next dictation.
+    private func note(_ mode: Indicator.Mode, hideAfter seconds: Double? = nil) {
+        guard phase != .recording else { return }
+        if mode == .hidden, writing > 1 || tail != nil { return }  // another dictation is still being written
+        indicator.show(mode, hideAfter: seconds)
+    }
+
+    private func showPendingNote() {
+        guard let text = pendingNote, indicator.isFree else { return }
+        pendingNote = nil
+        indicator.show(.message(text), hideAfter: 1.8)
+    }
+
+    /// Speech → Dictionary → clean-up → paste, for one recording.
+    private func write(_ samples: [Float], _ take: Take, dictionary: [Replacement], useModel: Bool) async {
+        let seconds = Double(samples.count) / 16_000
+        let t0 = Date()
+        let recording = await Task.detached { Pauses.prepare(samples) }.value
+        let levels = "\(String(format: "%.1f", seconds)) s (\(String(format: "%.1f", recording.speechSeconds)) s of speech, "
+            + "loudest \(Int(recording.peakDB)) dB)"
+        guard !recording.pieces.isEmpty else {
+            // Nothing that sounds like a voice. Say so plainly when the microphone gave next to nothing.
+            let silent = recording.peakDB < -50
+            History.log("\(levels) → nothing written: \(silent ? "the microphone was silent" : "no speech found")")
+            note(.message(silent ? "The microphone heard nothing · is it muted?" : "Didn't catch that"), hideAfter: silent ? 3 : 1.2)
+            return
+        }
+        var raw = ""
+        for attempt in 1...2 {
+            do {
+                raw = take.language == .farsi ? try await farsi.transcribe(recording) : try await transcriber.transcribe(recording)
+                break
+            } catch {
+                History.log("transcription failed (try \(attempt)): \(error)")
+                if attempt == 2 {
+                    note(.message("The speech model failed · nothing was written"), hideAfter: 3)
+                    return
+                }
+            }
+        }
+        let speechMs = Int(Date().timeIntervalSince(t0) * 1000)
+        guard !raw.isEmpty else {
+            History.log("\(levels) → nothing written: the speech model found no words")
+            note(.message("Didn't catch that"), hideAfter: 1.2)
+            return
+        }
+
+        let corrected = Replacements.apply(raw, dictionary)
+        state.countAutoFixes(in: raw)
+        // Farsi: Whisper already punctuates, and the English rules and clean-up model would mangle it.
+        let cleaned = take.language == .farsi
+            ? Cleaner.Result(text: corrected, fallbackReason: "Farsi", milliseconds: 0)
+            : await cleaner.clean(corrected, useModel: useModel)
+        var text = take.language == .farsi ? cleaned.text : Rules.finish(cleaned.text)
+        if useModel, cleaned.fallbackReason?.contains("model error") == true, await !cleaner.isHealthy() {
+            History.log("clean-up server stopped answering; restarting it")
+            startCleaner()
+        }
+        // Only "um" was said, or a Dictionary entry replaced everything with nothing: pasting "" would
+        // delete whatever is selected in the other app.
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            History.log("\(levels) → nothing written: nothing was left after the clean-up")
+            note(.message("Didn't catch that"), hideAfter: 1.2)
+            return
+        }
+
+        let front = NSWorkspace.shared.frontmostApplication
+        let target = front.flatMap { $0.processIdentifier != getpid() ? $0 : nil }
+        // Dictated straight after other text ("…see you then." then "One more thing…"): a space goes in between.
+        if let pid = target?.processIdentifier, text.first?.isWhitespace == false,
+           await Task.detached(operation: { TextBox.needsSpaceBeforePaste(in: pid) }).value {
+            text = " " + text
+        }
+        if dryRun {
+            History.log("dictate test: \(levels) → \(Cleaner.wordCount(text)) words" + (take.app == "test" ? ": \(text)" : "")
+                        + (text.hasPrefix(" ") ? " (with a space in front)" : ""))
+            return
+        }
+        let pasted = Paster.paste(text)
+        if pasted, state.learnFromEdits, take.language == .english, let target {
+            editWatcher.watch(pasted: text, app: target.localizedName ?? take.app, pid: target.processIdentifier)
+        }
+        lastText = text
+        lastRaw = raw
+        note(pasted ? .hidden : .message("Copied · press ⌘V to paste"), hideAfter: pasted ? nil : 2.5)
+
+        let entry = History.Entry(date: Date(), app: take.app, raw: raw, text: text.trimmingCharacters(in: .whitespaces),
+                                  cleanupNote: cleaned.fallbackReason, audioSeconds: (seconds * 10).rounded() / 10,
+                                  speechMs: speechMs, cleanupMs: cleaned.milliseconds)
+        History.append(entry)
+        state.add(entry)
+        History.log(take.language == .farsi
+            ? "\(levels) → Farsi speech \(speechMs) ms"
+            : "\(levels) → speech \(speechMs) ms, clean-up \(cleaned.milliseconds) ms"
+              + (cleaned.fallbackReason.map { " (rules only: \($0))" } ?? ""))
     }
 
     // MARK: - Status (menu-bar icon and the window's status badge)
@@ -569,6 +802,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(disabled("VoiceFlow — \(status)"))
         menu.addItem(.separator())
         menu.addItem(item("Open VoiceFlow", #selector(openWindow), key: "o"))
+        menu.addItem(.separator())
+        menu.addItem(disabled("Language"))
+        for language in Language.allCases {
+            let i = item(language.title, #selector(chooseLanguage(_:)))
+            i.representedObject = language.rawValue
+            i.state = state.language == language ? .on : .off
+            menu.addItem(i)
+        }
+        switch state.farsiModel {
+        case .loading where state.language == .farsi: menu.addItem(disabled("Loading the Farsi model…"))
+        case .downloading(let f): menu.addItem(disabled("Downloading the Farsi model… \(Int(f * 100))%"))
+        case .failed: menu.addItem(disabled("Farsi model failed to load (see Settings)"))
+        default: break
+        }
         if let lastText {
             let preview = lastText.count > 50 ? String(lastText.prefix(50)) + "…" : lastText
             menu.addItem(.separator())
@@ -623,6 +870,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc private func openWindow() { window.show() }
+    @objc private func chooseLanguage(_ sender: NSMenuItem) {
+        if let raw = sender.representedObject as? String, let language = Language(rawValue: raw) { state.language = language }
+    }
     @objc private func copyLast() { if let lastText { Paster.copy(lastText) } }
     @objc private func copyLastRaw() { if let lastRaw { Paster.copy(lastRaw) } }
     @objc private func quit() { NSApp.terminate(nil) }

@@ -7,6 +7,55 @@ import VoiceFlowCore
 
 if CommandLine.arguments.dropFirst().first == "--rules" { exit(runRulesCases() ? 0 : 1) }
 
+// --pauses: speaks phrases with long pauses in them, and very short phrases, and checks Parakeet hears all of each.
+if CommandLine.arguments.dropFirst().first == "--pauses" { exit(try await runPauseSpeech() ? 0 : 1) }
+
+// --hear file…: transcribes recordings of English speech (any format macOS reads) with Parakeet, exactly as the
+// app does. For checking what the speech model makes of a real recording, such as one with a long pause in it.
+if CommandLine.arguments.dropFirst().first == "--hear" {
+    let files = CommandLine.arguments.dropFirst(2).map { URL(fileURLWithPath: $0) }
+    let transcriber = Transcriber()
+    try await transcriber.load()
+    for file in files {
+        let samples = try Audio.load(file)
+        let t0 = Date()
+        let recording = Pauses.prepare(samples)
+        let text = try await transcriber.transcribe(recording)
+        print("\(file.lastPathComponent): \(String(format: "%.1f", Double(samples.count) / 16_000)) s audio → \(Int(Date().timeIntervalSince(t0) * 1000)) ms")
+        print("  speech: \(String(format: "%.1f", recording.speechSeconds)) s, loudest \(Int(recording.peakDB)) dB, pieces: "
+              + recording.pieces.map { String(format: "%.2f s", Double($0.count) / 16_000) }.joined(separator: " + "))
+        print("  HEARD: \(text)\n")
+    }
+    exit(0)
+}
+
+// --farsi file…: transcribes recordings of Farsi speech (any format macOS reads) with Whisper, as the app does
+// when the language is Farsi. Put the right text in file.txt beside a recording to see the word error rate.
+if CommandLine.arguments.dropFirst().first == "--farsi" {
+    let files = CommandLine.arguments.dropFirst(2).map { URL(fileURLWithPath: $0) }
+    let farsi = FarsiTranscriber()
+    var t0 = Date()
+    try await farsi.load { print("Downloading the Farsi model… \(Int($0 * 100))%") }
+    print("Farsi model loaded in \(Int(Date().timeIntervalSince(t0) * 1000)) ms\n")
+    var errors = 0, words = 0
+    for file in files {
+        let samples = try Audio.load(file)
+        t0 = Date()
+        let text = try await farsi.transcribe(samples)
+        print("\(file.lastPathComponent): \(String(format: "%.1f", Double(samples.count) / 16_000)) s audio → \(Int(Date().timeIntervalSince(t0) * 1000)) ms")
+        print("  HEARD: \(text)")
+        if let truth = try? String(contentsOf: file.deletingPathExtension().appendingPathExtension("txt"), encoding: .utf8) {
+            let e = Farsi.wordErrors(truth, text)
+            errors += e.errors; words += e.words
+            print("  TRUTH: \(truth.trimmingCharacters(in: .whitespacesAndNewlines))")
+            print("  word errors: \(e.errors)/\(e.words)")
+        }
+        print()
+    }
+    if words > 0 { print("Word error rate: \(String(format: "%.1f", Double(errors) / Double(words) * 100))% over \(words) words") }
+    exit(0)
+}
+
 // --cases: the 32 written test sentences (experiments/cleanup-model-test/cases.jsonl) through the app's real
 // clean-up (Rules + SpeakoFlow + safety checks + final punctuation), no speech. Shows every miss and fallback.
 if CommandLine.arguments.dropFirst().first == "--cases" {

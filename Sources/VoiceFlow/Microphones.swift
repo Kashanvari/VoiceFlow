@@ -9,6 +9,8 @@ struct Microphone: Identifiable, Hashable {
     let name: String
     let isVirtual: Bool
     let isBuiltIn: Bool
+    /// AirPods and other wireless headsets: their sound arrives a little later than a wired microphone's.
+    let isBluetooth: Bool
 }
 
 enum Microphones {
@@ -73,6 +75,8 @@ enum Microphones {
         let transport = UInt32(bitPattern: d.transportType)
         return Microphone(id: d.uniqueID, name: d.localizedName,
                           isVirtual: transport == kAudioDeviceTransportTypeVirtual,
-                          isBuiltIn: transport == kAudioDeviceTransportTypeBuiltIn)
+                          isBuiltIn: transport == kAudioDeviceTransportTypeBuiltIn,
+                          isBluetooth: transport == kAudioDeviceTransportTypeBluetooth
+                              || transport == kAudioDeviceTransportTypeBluetoothLE)
     }
 }

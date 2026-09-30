@@ -38,14 +38,11 @@ extension AppState {
 
     /// If the file can't be read, it is moved aside (corrections.unreadable-<date>.json), never overwritten.
     static func loadCorrections() -> [Correction] {
-        guard let data = try? Data(contentsOf: correctionsFile) else { return [] }
+        guard let data = saved(correctionsFile) else { return [] }
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         if let list = try? decoder.decode([Correction].self, from: data) { return list }
-        let stamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
-        let aside = History.folder.appendingPathComponent("corrections.unreadable-\(stamp).json")
-        try? FileManager.default.moveItem(at: correctionsFile, to: aside)
-        History.log("corrections.json could not be read; kept it as \(aside.lastPathComponent)")
+        setAside(correctionsFile, because: "isn't a list of corrections")
         return []
     }
 
